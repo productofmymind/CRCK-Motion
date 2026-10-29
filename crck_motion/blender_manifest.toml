@@ -1,0 +1,12 @@
+schema_version = "1.0.0"
+
+id = "crck_motion"
+version = "0.1.0"
+name = "CRCK Motion"
+tagline = "Drag a hand or foot and the GTA V ped body follows"
+maintainer = "productofmymind"
+type = "add-on"
+website = "https://github.com/productofmymind/CRCK-Motion"
+blender_version_min = "4.4.0"
+license = ["SPDX:GPL-3.0-or-later"]
+tags = ["Animation", "Rigging"]
