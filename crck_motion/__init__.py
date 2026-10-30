@@ -403,7 +403,7 @@ class CRCK_PT_panel(bpy.types.Panel):
             box.operator(CRCK_OT_fix_body_facing.bl_idname, icon="FILE_REFRESH")
         if "POLE_L_FA" not in rig.data.bones or "POLE_R_FA" not in rig.data.bones:
             layout.operator(CRCK_OT_add_elbow_poles.bl_idname, icon="CON_KINEMATIC")
-        running = autopose._running is not None
+        running = autopose.is_running() is not None
         layout.operator(autopose.CRCK_OT_autopose.bl_idname, text="Stop Autopose" if running else "Autopose",
                         icon="HAND", depress=running)
         layout.prop(s, "body_follows", slider=True)
@@ -444,11 +444,16 @@ def register():
     for c in classes:
         bpy.utils.register_class(c)
     bpy.types.Scene.crck_motion = bpy.props.PointerProperty(type=CRCKMotionSettings)
+    bpy.app.handlers.load_pre.append(autopose.on_load)
 
 
 def unregister():
-    if autopose._running is not None:
-        autopose._running.stop = True
+    live = autopose.is_running()
+    if live is not None:
+        live.stop = True
+    autopose.cleanup()
+    if autopose.on_load in bpy.app.handlers.load_pre:
+        bpy.app.handlers.load_pre.remove(autopose.on_load)
     presets.unregister_previews()
     del bpy.types.Scene.crck_motion
     for c in reversed(classes):

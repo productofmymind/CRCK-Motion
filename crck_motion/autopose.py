@@ -46,7 +46,7 @@ CARRY = {"hand_l": "SKEL_Spine3", "hand_r": "SKEL_Spine3",
          "foot_l": "SKEL_Pelvis", "foot_r": "SKEL_Pelvis",
          "knee_l": "SKEL_Pelvis", "knee_r": "SKEL_Pelvis",
          "elbow_l": "SKEL_Spine3", "elbow_r": "SKEL_Spine3"}
-TURNABLE = {"hand_l", "hand_r", "foot_l", "foot_r", "hips", "chest", "root"}
+TURNABLE = {"hand_l", "hand_r", "foot_l", "foot_r", "hips", "chest", "root"} | set(BENDS)
 BODY_BONES = ["SKEL_ROOT", *SPINE, "SKEL_L_Clavicle", "SKEL_R_Clavicle", "SKEL_Neck_1", "SKEL_Head"]
 REQUIRED = set(TORSO) | {TARGET_BONES[k] for k in TARGET_BONES if k not in OPTIONAL} | {
     "SKEL_L_Forearm", "SKEL_R_Forearm", "SKEL_L_Calf", "SKEL_R_Calf"}
@@ -336,6 +336,18 @@ class Drag:
         R = Matrix.Rotation(angle, 4, axis)
         if key in LIMBS:
             T[key] = turn_control(self.rig, TARGET_BONES[key], T[key], R, T[key].translation)
+        elif key in BENDS:
+            # twist the limb about its root-to-end line: the knee or elbow swings round it and the foot or hand
+            # turns by the same angle. Pressing X, Y, Z or V picks the axis, and which way along the limb it points
+            # decides which way the mouse turns the limb.
+            root_bone, end = BENDS[key]
+            root = self.fk0[root_bone].translation
+            along = (T[end].translation - root).normalized()
+            R = Matrix.Rotation(angle if axis.dot(along) >= 0 else -angle, 4, along)
+            joint = T[key].translation
+            T[key] = Matrix.Translation(root + R.to_3x3() @ (joint - root) - joint) @ T[key]
+            T[end] = turn_control(self.rig, TARGET_BONES[end], T[end], R, T[end].translation)
+            carried.discard(end)  # a carried target would be put back where the body leaves it
         elif key == "hips":
             x[3:6] = axis * angle
         elif key == "chest":
@@ -443,6 +455,34 @@ def propagate(rig, frame, before, settings):
 
 # --- viewport tool ------------------------------------------------------------------------
 _running = None  # the live AutoposeOperator, read by the draw callback and the panel
+_handle = None   # its viewport draw handler
+
+
+def is_running():
+    """The live Autopose operator, or None. Blender throws a running modal operator away without telling us
+    when a file loads or when the modal raises, which leaves `_running` pointing at a dead object."""
+    try:
+        _running.stop  # touching a discarded operator raises
+        return _running
+    except (ReferenceError, AttributeError):
+        return None
+
+
+def cleanup():
+    """Forget the operator and take its handles off the viewport. Safe to call at any time, any number of times."""
+    global _running, _handle
+    if _handle is not None:
+        try:
+            bpy.types.SpaceView3D.draw_handler_remove(_handle, "WINDOW")
+        except (ValueError, RuntimeError):
+            pass
+        _handle = None
+    _running = None
+
+
+@bpy.app.handlers.persistent
+def on_load(*_):
+    cleanup()  # the modal operator doesn't survive loading a file
 
 
 def _circle2d(c, r, n=20):
@@ -463,8 +503,12 @@ def _project(region, rv3d, W, pts):
 
 
 def _draw():
-    op = _running
-    rig = op.rig if op else None
+    op = is_running()
+    if op is None:  # dead operator: a draw callback can't remove itself, so ask for it a moment later
+        if _handle is not None and not bpy.app.timers.is_registered(cleanup):
+            bpy.app.timers.register(cleanup, first_interval=0.0)
+        return
+    rig = op.rig
     if rig is None:
         return
     region, rv3d = bpy.context.region, bpy.context.region_data
@@ -518,8 +562,6 @@ class CRCK_OT_autopose(bpy.types.Operator):
     bl_idname = "crck_motion.autopose"
     bl_label = "Autopose"
 
-    _handle = None
-
     @property
     def rig(self):
         """Looked up by name each time: undo and file reloads replace the object, so a stored one goes stale."""
@@ -530,10 +572,13 @@ class CRCK_OT_autopose(bpy.types.Operator):
         return context.area and context.area.type == "VIEW_3D" and is_ped_rig(context.active_object)
 
     def invoke(self, context, event):
-        global _running
-        if _running is not None:  # second click on the button stops it
-            _running.stop = True
+        global _running, _handle
+        live = is_running()
+        if live is not None:  # second click on the button stops it
+            live.stop = True
+            live.teardown()  # at once: don't wait for the next mouse move
             return {"FINISHED"}
+        cleanup()  # whatever a dead operator left behind
         self.rig_name = context.active_object.name
         self.region = next(r for r in context.area.regions if r.type == "WINDOW")
         self.rv3d = context.space_data.region_3d
@@ -542,23 +587,29 @@ class CRCK_OT_autopose(bpy.types.Operator):
         self.turning, self.click_confirms = False, False
         if context.mode != "POSE":
             bpy.ops.object.mode_set(mode="POSE")
-        CRCK_OT_autopose._handle = bpy.types.SpaceView3D.draw_handler_add(_draw, (), "WINDOW", "POST_PIXEL")
+        _handle = bpy.types.SpaceView3D.draw_handler_add(_draw, (), "WINDOW", "POST_PIXEL")
         _running = self
         context.window_manager.modal_handler_add(self)
         self.area.tag_redraw()
         return {"RUNNING_MODAL"}
 
-    def finish(self):
-        global _running
+    def teardown(self):
+        """Switch Autopose off: undo a drag in progress, drop the handles. Idempotent."""
         if self.drag:
             try:
                 self.drag.cancel()
             except ReferenceError:  # the rig was replaced under the drag; nothing left to restore
                 pass
-        bpy.types.SpaceView3D.draw_handler_remove(CRCK_OT_autopose._handle, "WINDOW")
-        _running = None
-        self.area.header_text_set(None)
-        self.area.tag_redraw()
+            self.drag = None
+        cleanup()
+        try:
+            self.area.header_text_set(None)
+            self.area.tag_redraw()
+        except ReferenceError:  # the area is gone (workspace or file changed)
+            pass
+
+    def finish(self):
+        self.teardown()
         return {"FINISHED"}
 
     # --- screen helpers -----------------------------------------------------------------------
@@ -605,12 +656,27 @@ class CRCK_OT_autopose(bpy.types.Operator):
         return (self.rig.matrix_world.to_3x3().inverted() @ to_viewer).normalized()
 
     def screen_angle(self, m):
+        """Where the mouse is around the handle, in radians, or None while it is too close to say."""
         c = self.screen(self.drag.handle0) or m
-        return math.atan2(m.y - c.y, m.x - c.x)
+        v = m - c
+        return math.atan2(v.y, v.x) if v.length >= 20 else None
+
+    def turn_by_mouse(self, m):
+        """Total turn so far: the mouse's angle around the handle, counted from where it first got clear of the
+        handle (pressing R with the mouse on the dot gives no direction yet), and unwrapped so a full turn works."""
+        a = self.screen_angle(m)
+        if a is not None:
+            if self.angle_prev is not None:
+                d = a - self.angle_prev
+                self.angle_total += (d + math.pi) % (2 * math.pi) - math.pi
+            self.angle_prev = a
+        return self.angle_total
 
     def header(self, context):
         s = context.scene.crck_motion
-        if self.turning:
+        if self.turning and self.drag and self.drag.key in BENDS:
+            text = "Twist the limb  |  X/Y/Z or V: flip the direction   Click/Enter: confirm   Esc/RMB: cancel"
+        elif self.turning:
             text = "Turn  |  X/Y/Z: axis   V: view axis   Click/Enter: confirm   Esc/RMB: cancel"
         else:
             text = "Move  |  Shift: whole body   Ctrl: body helps a hand/foot reach   Alt: only this limb   Wheel: Reach {}   Esc/RMB: cancel".format(s.reach)
@@ -625,7 +691,7 @@ class CRCK_OT_autopose(bpy.types.Operator):
         m = self.mouse(event)
         if turning:
             self.axis = self.view_axis()
-            self.angle0 = self.screen_angle(m)
+            self.angle_prev, self.angle_total = None, 0.0
         else:
             self.grab_offset = Vector()
             self.grab_offset = self.drag.handle0 - self.to_armature(m)
@@ -633,8 +699,7 @@ class CRCK_OT_autopose(bpy.types.Operator):
 
     def update(self, m):
         if self.turning:
-            a = self.screen_angle(m) - self.angle0
-            self.drag.turn(self.axis, a)
+            self.drag.turn(self.axis, self.turn_by_mouse(m))
         else:
             self.drag.move(self.to_armature(m))
 
@@ -649,6 +714,16 @@ class CRCK_OT_autopose(bpy.types.Operator):
         self.area.header_text_set(None)
 
     def modal(self, context, event):
+        try:
+            return self._modal(context, event)
+        except Exception:  # whatever went wrong, don't leave a half-running tool behind
+            import traceback
+            traceback.print_exc()
+            self.teardown()
+            self.report({"ERROR"}, "Autopose stopped on an error (details in the console)")
+            return {"CANCELLED"}
+
+    def _modal(self, context, event):
         if self.stop or not is_ped_rig(self.rig) or context.mode != "POSE":
             return self.finish()
         self.area.tag_redraw()

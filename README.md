@@ -47,10 +47,13 @@ CRCK Motion is pure Python. It uses only what ships with Blender (numpy included
 | Shift-drag | Moves the whole character |
 | Alt-drag | Moves only that limb |
 | **P** over a hand or foot | Pinned (stays put in the world) or carried (rides with the chest or pelvis). Feet start pinned, and a hand or foot you drag becomes pinned |
+| **R** over a knee or elbow | Twists the whole leg or arm about its hip-to-ankle (or shoulder-to-wrist) line: the knee swings round it and the foot or hand turns by the same angle. **X**, **Y**, **Z** or **V** flip the direction. (Dragging a knee or elbow instead only moves the joint) |
 | Drag the look-at | Aims the head (40% neck, 60% head). **Look-at Off** in the panel turns it off |
 | Mouse wheel while dragging | Changes Reach |
 | Esc or right-click while dragging | Cancels the drag |
 | Esc otherwise | Leaves the tool |
+
+**R** turns by the mouse's angle around the handle, counted from where the mouse first moves clear of it, so you can press R with the mouse on the dot and then circle it. Autopose switches itself off, and tells you, if anything inside it fails or a file is loaded, so the button never gets stuck on.
 
 Clicks away from the handles behave as normal in Blender. Each drag is one undo step.
 

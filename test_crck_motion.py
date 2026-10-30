@@ -207,6 +207,53 @@ with tempfile.TemporaryDirectory() as tmp:
     check("preset saves and loads", json.loads(path.read_text())["frames"]["0"]["bones"].keys() == data["frames"]["0"]["bones"].keys())
 to_rest()
 
+# 4d twisting a limb: the knee/elbow swings about the root-to-end line, the foot/hand turns with it, nothing else moves
+def twist_check(label, knee_key, hip, mid, end, setup):
+    setup()
+    vl.update()
+    H, M0, E0 = pb[hip].head.copy(), pb[mid].head.copy(), pb[end].head.copy()
+    q0 = pb[end].matrix.to_quaternion()
+    d = ap.Drag(rig, knee_key, "BODY", 0.5); d.turn((0, 0, 1), math.radians(30)); vl.update()
+    along = (E0 - H).normalized()
+    flat = lambda v: (v - H) - along * (v - H).dot(along)
+    swing = math.degrees(flat(M0).angle(flat(pb[mid].head)))
+    dq = pb[end].matrix.to_quaternion() @ q0.inverted()
+    check(f"{label} twist swings the joint 30 deg about the limb", abs(swing - 30) < 1.5, f"{swing:.1f}")
+    check(f"{label} twist turns the end 30 deg about the limb axis", abs(math.degrees(dq.angle) - 30) < 1.5 and abs(Vector(dq.axis).dot(along)) > 0.98,
+          f"{math.degrees(dq.angle):.1f} deg, axis dot {abs(Vector(dq.axis).dot(along)):.3f}")
+    s_knee = math.atan2(flat(M0).cross(flat(pb[mid].head)).dot(along), flat(M0).dot(flat(pb[mid].head)))
+    s_end = dq.angle * (1 if Vector(dq.axis).dot(along) > 0 else -1)
+    s_end = (s_end + math.pi) % (2 * math.pi) - math.pi
+    check(f"{label} twist turns the joint and the end the same way", abs(math.degrees(s_knee - s_end)) < 2, f"{math.degrees(s_knee):.1f} vs {math.degrees(s_end):.1f}")
+    check(f"{label} twist keeps the root and end where they are", (pb[hip].head - H).length < 1e-3 and (pb[end].head - E0).length < 2e-3,
+          f"{(pb[end].head - E0).length*1000:.2f} mm")
+    d.cancel(); vl.update()
+    check(f"{label} twist cancels cleanly", (pb[mid].head - M0).length < 1e-4)
+def crouch_down():
+    to_rest(); ap.Drag(rig, "hips", "BODY", 0.5).move(pb["SKEL_ROOT"].head + Vector((0, -0.05, -0.25)))
+def bend_arm():
+    to_rest(); ap.Drag(rig, "hand_l", "LIMB", 0.5).move(pb["IK_L_FA"].head + Vector((0.1, 0.2, 0.3)))
+def to_rest():
+    for p in pb: p.matrix_basis = Matrix()
+    rig.pop("crck_look", None); vl.update()
+from mathutils import Matrix
+twist_check("leg", "knee_l", "SKEL_L_Thigh", "SKEL_L_Calf", "SKEL_L_Foot", crouch_down)
+twist_check("arm", "elbow_l", "SKEL_L_UpperArm", "SKEL_L_Forearm", "SKEL_L_Hand", bend_arm)
+to_rest()
+check("knees and elbows can be turned with R", {"knee_l", "knee_r", "elbow_l", "elbow_r"} <= ap.TURNABLE)
+
+# 4e Autopose survives losing its operator: file loads and errors inside the modal must not leave it stuck on
+class _Dead:
+    @property
+    def stop(self): raise ReferenceError("StructRNA of type CRCK_OT_autopose has been removed")
+ap._running = _Dead()
+ap._handle = bpy.types.SpaceView3D.draw_handler_add(lambda: None, (), "WINDOW", "POST_PIXEL")
+check("a discarded operator isn't reported as running", ap.is_running() is None)
+ap.on_load()
+check("loading a file clears a dead operator and its draw handler", ap._running is None and ap._handle is None)
+ap.cleanup(); ap.cleanup()
+check("cleanup can be called any number of times", ap._running is None)
+
 # 5 Reach propagation on existing keys
 s = C.scene.crck_motion; s.reach = 6
 for f in (0, 3, 6, 9, 20):
