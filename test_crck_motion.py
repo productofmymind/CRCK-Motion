@@ -3,7 +3,7 @@ import os, sys, time, bpy
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import crck_motion
 from crck_motion import autopose as ap
-from mathutils import Vector
+from mathutils import Quaternion, Vector
 crck_motion.register()
 C = bpy.context; vl = C.view_layer
 rig = bpy.data.objects["control_rig"]; vl.objects.active = rig; rig.select_set(True)
@@ -222,6 +222,36 @@ check("edited frame moved", abs(r6) > 0.1, f"{r6:.3f}")
 check("frame 3 partial", 0.05 * abs(r6) < abs(r3) < abs(r6), f"{r3:.3f}")
 check("frame 20 untouched", abs(vals[20] - fy.keyframe_points[-1].co.y) < 1e-6 and abs(vals[0]-base) < abs(r3))
 check("pin saved", "hand_l" in ap.pinned(rig))
+
+# 5b key thinning: a smooth move keyed every frame comes back with few keys and the same motion
+from crck_motion import gta_clip
+kept_action = rig.animation_data.action
+rig.animation_data.action = bpy.data.actions.new("thin_test")
+C.scene.tool_settings.use_keyframe_insert_auto = False
+start = pb["IK_L_FA"].head.copy()
+for f in range(0, 61):
+    C.scene.frame_set(f)
+    to_rest()
+    pb["IK_L_FA"].location = rig.data.bones["IK_L_FA"].matrix_local.to_3x3().inverted() @ (
+        start + Vector((0.15 * math.sin(f / 9), 0.2 * math.sin(f / 15), 0.1 * math.cos(f / 12))) - rig.data.bones["IK_L_FA"].head_local)
+    pb["SKEL_Head"].rotation_quaternion = Quaternion((0, 0, 1), math.radians(f)) * (-1 if f % 2 else 1)  # sign flips every frame
+    ap.key_pose(rig, f)
+def track():
+    out = []
+    for f in range(0, 61):
+        C.scene.frame_set(f); vl.update()
+        out.append((pb["SKEL_L_Hand"].head.copy(), pb["SKEL_Head"].matrix.to_quaternion()))
+    return out
+dense = track()
+kept = gta_clip.thin(rig.animation_data.action, 1.0)
+thinned = track()
+move = max((a[0] - b[0]).length for a, b in zip(dense, thinned))
+turn = max(math.degrees(a[1].rotation_difference(b[1]).angle) for a, b in zip(dense, thinned))
+check("thinning keeps few keys", kept < 20, f"61 -> {kept}")
+check("thinned motion stays within 5 mm", move < 0.005, f"{move*1000:.2f} mm")
+check("thinning ignores quaternion sign flips", turn < 1.5, f"{turn:.2f} deg")
+bpy.data.actions.remove(rig.animation_data.action)
+rig.animation_data.action = kept_action
 
 # 6 bake
 C.scene.frame_start, C.scene.frame_end = 0, 20

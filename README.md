@@ -16,7 +16,8 @@
 | Change one frame without breaking the motion | **Reach**: with Auto Keying on, an edit fades into the keys around it (Smooth, Hold, Linear or Sharp falloff) |
 | Start from a pose instead of a T-pose | **Presets**: a thumbnail browser for saved poses and animations. Preview, blend, mirror, apply, and save your own |
 | Start from a real GTA V animation | **Import GTA Clip**: a `.ycd` or `.ycd.xml` becomes editable keys on the control rig, one action per clip |
-| Get the animation into the game | **Bake to Game Skeleton**: a visual bake onto `skel` with constraints kept, named `<action>_game`, then export with Sollumz as usual |
+| Get the animation into the game | **Export GTA Clip**: bakes onto `skel` and saves a `.ycd` (or `.ycd.xml`) in one step. **Bake to Game Skeleton** does just the bake, for exporting with Sollumz yourself |
+| Lighter, easier-to-edit keys | **Thin Keys**: the fewest whole-pose keys that keep the motion within a tolerance (imports are thinned this way too) |
 
 ## Install
 
@@ -72,13 +73,19 @@ Your own presets are saved in Blender's extension user folder (`extensions/.user
 
 ## Import GTA Clip
 
-**Import GTA Clip** (in the main panel) takes a clip dictionary, either the game's binary `.ycd` or a CodeWalker `.ycd.xml`, and turns every clip in it into an action on the control rig: a key per frame, ready to edit with Autopose, Reach, the Dope Sheet or the Graph Editor. Switch between the clips in the Action editor. **Save Preset** with **Animation** ticked keeps one as a preset.
+**Import GTA Clip** (in the main panel) takes a clip dictionary, either the game's binary `.ycd` or a CodeWalker `.ycd.xml`, and turns every clip in it into an action on the control rig, ready to edit with Autopose, Reach, the Dope Sheet or the Graph Editor. **Key Tolerance** (default 1: within 5 mm, about 1 degree) thins the keys to the fewest whole poses that stay that close to the clip; a typical idle goes from 139 keys to 27. 0 keeps a key on every frame. Switch between the clips in the Action editor. **Save Preset** with **Animation** ticked keeps one as a preset.
 
 - **Sollumz** has to be installed: it reads the clip dictionary.
 - **Binary `.ycd`** is read through your own **CodeWalker** install: set its folder once in Preferences > Add-ons > CRCK Motion > CodeWalker Folder. CRCK Motion builds a small helper (`ycdtool.cs`, using the C# compiler that comes with Windows) that asks CodeWalker to turn the file into `.ycd.xml`. No CodeWalker code ships with the add-on. A `.ycd.xml` needs none of this.
 - **Root Motion** (in the file browser's side panel): off, the clip plays where your character stands; on, the character moves where the game would put it (for a seated clip that is the seat's spot).
 - How it converts: the game skeleton plays the clip, then each frame is written onto the control rig. Plain bones (spine, neck, head, fingers, pelvis, toes) copy their turn; hands and feet get their IK targets; elbows and knees get their poles. Hands, feet, head and pelvis land within 0.01 cm of the clip.
 - Known gaps: an arm's twist along its length can differ from the clip (the IK decides it), knees can be a few cm off, and facial tracks are skipped.
+
+## Export GTA Clip
+
+**Export GTA Clip** bakes the scene's frame range onto the game skeleton and saves it as a clip dictionary with one clip in it. Name the file (`.ycd`, or `.ycd.xml` for CodeWalker) and the clip (the name you play it by in the game). Scale, and bones that never leave their rest pose, are left out, as the game's own clips do. Writing binary `.ycd` uses your CodeWalker install, like importing it.
+
+Round trip on a game idle: imported, thinned, exported to `.ycd` and imported again, it lands within 0.06 cm of the original clip typically, 0.84 cm at the worst point.
 
 ## How it works
 
@@ -89,7 +96,6 @@ When you drag, a small solver (damped least squares) finds how far the hips shou
 ## Known gaps
 
 - Binary `.ycd` import is Windows only (it uses CodeWalker and the .NET Framework compiler that comes with Windows). On macOS and Linux, export the clip to `.ycd.xml` with CodeWalker first.
-- No exporter back to binary `.ycd` yet: bake, export `.ycd.xml` with Sollumz, and convert it with CodeWalker.
 - Not built yet: lock in place, motion trail and smoothing brush. Reach only moves keys that already exist.
 - Only the Freemode male rig is bundled.
 

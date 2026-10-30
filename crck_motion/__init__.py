@@ -356,14 +356,16 @@ class CRCK_PT_panel(bpy.types.Panel):
         box.prop(s, "reach")
         box.prop(s, "falloff")
         box.prop(s, "intensity", slider=True)
+        box.operator(gta_clip.CRCK_OT_thin_keys.bl_idname, icon="IPO_BEZIER")
 
         layout.operator(gta_clip.CRCK_OT_import_clip.bl_idname, icon="IMPORT")
         layout.operator(CRCK_OT_bake.bl_idname, icon="EXPORT")
+        layout.operator(gta_clip.CRCK_OT_export_clip.bl_idname, icon="EXPORT")
 
 
 classes = (CRCKMotionSettings, CRCKMotionPreferences, CRCK_OT_import_body, CRCK_OT_add_elbow_poles,
            CRCK_OT_add_rig, CRCK_OT_key_pose,
-           CRCK_OT_toggle_pin, CRCK_OT_bake, autopose.CRCK_OT_autopose, gta_clip.CRCK_OT_import_clip, CRCK_PT_panel, *presets.classes)
+           CRCK_OT_toggle_pin, CRCK_OT_bake, autopose.CRCK_OT_autopose, gta_clip.CRCK_OT_import_clip, gta_clip.CRCK_OT_thin_keys, gta_clip.CRCK_OT_export_clip, CRCK_PT_panel, *presets.classes)
 
 
 def register():

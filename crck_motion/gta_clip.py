@@ -14,6 +14,7 @@ import xml.etree.ElementTree as ET
 from pathlib import Path
 
 import bpy
+import numpy as np
 from mathutils import Matrix, Vector
 
 from . import autopose as ap, presets as pr
@@ -49,6 +50,15 @@ def ycd_to_xml(path, codewalker):
     if r.returncode:
         raise RuntimeError(f"CodeWalker couldn't read {Path(path).name}: {r.stderr.strip()}")
     return out
+
+
+def xml_to_ycd(xml, out, codewalker):
+    if not codewalker or not (Path(codewalker) / "CodeWalker.Core.dll").exists():
+        raise RuntimeError("Writing .ycd uses your CodeWalker install: set its folder in "
+                           "Preferences > Add-ons > CRCK Motion > CodeWalker Folder (or export a .ycd.xml)")
+    r = subprocess.run([str(helper_exe()), str(codewalker), "to-ycd", str(xml), str(out)], capture_output=True, text=True)
+    if r.returncode:
+        raise RuntimeError(f"CodeWalker couldn't write {Path(out).name}: {r.stderr.strip()}")
 
 
 def clip_names(xml_path):
@@ -123,7 +133,60 @@ class Converter:
                 pbs[n].matrix_basis = rb[n].matrix_local.inverted() @ M
 
 
-def import_clips(context, rig, path, codewalker="", root_motion=False):
+# --- key thinning -------------------------------------------------------------------------------
+def action_fcurves(action):
+    return [fc for layer in action.layers for strip in layer.strips for bag in strip.channelbags for fc in bag.fcurves]
+
+
+def thin(action, tolerance=1.0):
+    """Keep the fewest whole-pose keys (one frame set shared by every curve, so it stays easy to pose) that
+    redraw the motion within `tolerance`: 1 = 5 mm of movement, about 1 degree of turn. Returns keys kept."""
+    fcs = [fc for fc in action_fcurves(action) if fc.keyframe_points]
+    if not fcs or tolerance <= 0:
+        return 0
+    f0 = round(min(fc.keyframe_points[0].co.x for fc in fcs))
+    f1 = round(max(fc.keyframe_points[-1].co.x for fc in fcs))
+    xs = list(range(f0, f1 + 1))
+    data = np.array([[fc.evaluate(f) for f in xs] for fc in fcs])
+    # a quaternion and its negative are the same turn; sampled poses can flip between them, which a curve
+    # between two sparse keys would swing through. Keep each bone's quaternion on one side.
+    quats = {}
+    for i, fc in enumerate(fcs):
+        if fc.data_path.endswith("rotation_quaternion"):
+            quats.setdefault(fc.data_path, [None] * 4)[fc.array_index] = i
+    for idx in quats.values():
+        if None in idx:
+            continue
+        q = data[idx]
+        for f in range(1, len(xs)):
+            if np.dot(q[:, f], q[:, f - 1]) < 0:
+                q[:, f] *= -1
+        data[idx] = q
+    scale = np.array([0.005 if fc.data_path.endswith("location") else 0.01 for fc in fcs])[:, None] * tolerance
+    keep = {f0, f1}
+    while True:
+        ks = sorted(keep)
+        for fc, row in zip(fcs, data):
+            pts = fc.keyframe_points
+            pts.clear()
+            pts.add(len(ks))
+            pts.foreach_set("co", [v for f in ks for v in (f, row[f - f0])])
+            for p in pts:
+                p.interpolation = "BEZIER"
+                p.handle_left_type = p.handle_right_type = "AUTO_CLAMPED"
+            fc.update()
+        err = (np.abs(np.array([[fc.evaluate(f) for f in xs] for fc in fcs]) - data) / scale).max(axis=0)
+        added = False
+        for a, b in zip(ks, ks[1:]):
+            seg = err[a - f0 + 1:b - f0]
+            if seg.size and seg.max() > 1:
+                keep.add(a + 1 + int(seg.argmax()))
+                added = True
+        if not added:
+            return len(ks)
+
+
+def import_clips(context, rig, path, codewalker="", root_motion=False, tolerance=1.0):
     """Import every clip in a .ycd / .ycd.xml as its own control-rig action. Returns the actions."""
     pkg = sollumz()
     ycdimport = importlib.import_module(pkg + ".ycd.ycdimport")
@@ -168,7 +231,7 @@ def import_clips(context, rig, path, codewalker="", root_motion=False):
             for st in strips:
                 st.scale = 1.0
             f0 = math.floor(min(st.frame_start for st in strips))
-            f1 = math.ceil(max(st.frame_end for st in strips)) - 1
+            f1 = math.floor(max(st.frame_end for st in strips) + 1e-4)  # the last key sits on frame_end
             frames = []
             for f in range(f0, f1 + 1):
                 scene.frame_set(f)
@@ -193,6 +256,9 @@ def import_clips(context, rig, path, codewalker="", root_motion=False):
                 pr.key_bones(rig, conv.keyed, f)
             act.use_frame_range = True
             act.frame_range = (f0, f1)
+            act["crck_keys_before_thinning"] = len(frames)
+            if tolerance > 0:
+                thin(act, tolerance)
             made.append(act)
     finally:
         wm.progress_end()
@@ -217,6 +283,130 @@ def import_clips(context, rig, path, codewalker="", root_motion=False):
     return made
 
 
+# --- export ------------------------------------------------------------------------------------
+def tidy_baked(action):
+    """Drop what a game clip doesn't carry: scale, and bones the bake left where they rest."""
+    for bag in [bag for layer in action.layers for strip in layer.strips for bag in strip.channelbags]:
+        by_path = {}
+        for fc in bag.fcurves:
+            by_path.setdefault(fc.data_path, []).append(fc)
+        for path, fcs in by_path.items():
+            vals = [[k.co.y for k in fc.keyframe_points] for fc in fcs]
+            still = all(max(v) - min(v) < 1e-5 for v in vals if v)
+            rest = (path.endswith("location") and all(abs(v[0]) < 1e-5 for v in vals if v)) or (
+                path.endswith("rotation_quaternion") and all(abs(v[0] - (fc.array_index == 0)) < 1e-5 for fc, v in zip(fcs, vals) if v))
+            if path.endswith("scale") or (still and rest and '"SKEL_ROOT"' not in path):
+                for fc in fcs:
+                    bag.fcurves.remove(fc)
+
+
+def export_clip(context, rig, filepath, name, codewalker=""):
+    """Bake the scene's frame range onto the game skeleton and write it as a one-clip dictionary."""
+    pkg = sollumz()
+    ycdimport = importlib.import_module(pkg + ".ycd.ycdimport")
+    ycdexport = importlib.import_module(pkg + ".ycd.ycdexport")
+    SollumType = importlib.import_module(pkg + ".sollumz_properties").SollumType
+    skel = game_skel(rig)
+    if bpy.ops.crck_motion.bake() != {"FINISHED"}:
+        raise RuntimeError("Baking to the game skeleton failed")
+    act = skel.animation_data.action
+    tidy_baked(act)
+    filepath = Path(filepath)
+    as_xml = filepath.name.lower().endswith(".xml")
+    dict_name = filepath.name.split(".")[0]
+    cd, clips_obj, anims_obj = ycdimport.create_clip_dictionary_template(dict_name)
+    made = [cd, clips_obj, anims_obj]
+    try:
+        anim = ycdimport.create_anim_obj(SollumType.ANIMATION)
+        made.append(anim)
+        anim.parent = anims_obj
+        props = anim.animation_properties
+        props.hash = name
+        props.target_id = skel.data  # target first: setting it after the action would re-map the action's bones
+        props.action = act
+        clip = ycdimport.create_anim_obj(SollumType.CLIP)
+        made.append(clip)
+        clip.parent = clips_obj
+        cp = clip.clip_properties
+        cp.hash, cp.name = name, f"{name}.clip"
+        frames = act.frame_range[1] - act.frame_range[0]
+        cp.duration = frames / (context.scene.render.fps / context.scene.render.fps_base)
+        link = cp.animations.add()
+        link.animation, link.start_frame, link.end_frame = anim, 0, frames
+        xml = filepath if as_xml else Path(tempfile.mkdtemp(prefix="crck_ycd_")) / f"{dict_name}.ycd.xml"
+        if not ycdexport.export_ycd(cd, str(xml)):
+            raise RuntimeError("Sollumz couldn't export the clip (see the Info editor)")
+        if not as_xml:
+            xml_to_ycd(xml, filepath, codewalker)
+    finally:
+        for o in made:
+            bpy.data.objects.remove(o)
+    return filepath
+
+
+class CRCK_OT_export_clip(bpy.types.Operator):
+    """Bake the scene's frame range onto the game skeleton and save it as a GTA V clip dictionary (.ycd or .ycd.xml)"""
+    bl_idname = "crck_motion.export_clip"
+    bl_label = "Export GTA Clip"
+
+    filepath: bpy.props.StringProperty(subtype="FILE_PATH")
+    filter_glob: bpy.props.StringProperty(default="*.ycd;*.ycd.xml", options={"HIDDEN"})
+    clip_name: bpy.props.StringProperty(
+        name="Clip Name", description="The clip's name inside the dictionary: the name you play it by in the game")
+
+    @classmethod
+    def poll(cls, context):
+        return ap.is_ped_rig(context.active_object)
+
+    def invoke(self, context, event):
+        ad = context.active_object.animation_data
+        act = ad.action.name if ad and ad.action else "clip"
+        base = act.split(" ")[0] if " " in act else "my_anims"
+        if not self.filepath:
+            self.filepath = bpy.path.abspath("//") + base + ".ycd"
+        if not self.clip_name:
+            self.clip_name = act.split(" ")[-1].replace(".", "_")
+        context.window_manager.fileselect_add(self)
+        return {"RUNNING_MODAL"}
+
+    def execute(self, context):
+        from . import prefs
+        p = prefs()
+        cw = bpy.path.abspath(p.codewalker_dir) if p and p.codewalker_dir else ""
+        if not self.filepath.lower().endswith((".ycd", ".xml")):
+            self.filepath += ".ycd"
+        try:
+            out = export_clip(context, context.active_object, self.filepath, self.clip_name or "clip", cw)
+        except RuntimeError as e:
+            self.report({"ERROR"}, str(e))
+            return {"CANCELLED"}
+        self.report({"INFO"}, f"Saved clip '{self.clip_name}' to {out}")
+        return {"FINISHED"}
+
+
+class CRCK_OT_thin_keys(bpy.types.Operator):
+    """Thin the active action down to the fewest whole-pose keys that stay within the tolerance of the motion"""
+    bl_idname = "crck_motion.thin_keys"
+    bl_label = "Thin Keys"
+    bl_options = {"REGISTER", "UNDO"}
+
+    tolerance: bpy.props.FloatProperty(
+        name="Tolerance", default=1.0, min=0.05, max=10,
+        description="How close to the current motion: 1 = 5 mm, about 1 degree")
+
+    @classmethod
+    def poll(cls, context):
+        ob = context.active_object
+        return ap.is_ped_rig(ob) and ob.animation_data and ob.animation_data.action
+
+    def execute(self, context):
+        act = context.active_object.animation_data.action
+        before = len({round(k.co.x) for fc in action_fcurves(act) for k in fc.keyframe_points})
+        kept = thin(act, self.tolerance)
+        self.report({"INFO"}, f"{act.name}: {before} keyed frames -> {kept}")
+        return {"FINISHED"}
+
+
 class CRCK_OT_import_clip(bpy.types.Operator):
     """Import a GTA V clip dictionary (.ycd or .ycd.xml) onto the control rig as editable keys, one action per clip"""
     bl_idname = "crck_motion.import_clip"
@@ -225,6 +415,10 @@ class CRCK_OT_import_clip(bpy.types.Operator):
 
     filepath: bpy.props.StringProperty(subtype="FILE_PATH")
     filter_glob: bpy.props.StringProperty(default="*.ycd;*.ycd.xml", options={"HIDDEN"})
+    tolerance: bpy.props.FloatProperty(
+        name="Key Tolerance", default=1.0, min=0, max=10,
+        description="Thin the keys down to the fewest whole-pose keys that stay this close to the clip "
+                    "(1 = 5 mm, about 1 degree). 0 keeps a key on every frame")
     root_motion: bpy.props.BoolProperty(
         name="Root Motion", default=False,
         description="Keep the clip's root motion: the character moves where the game would put it. "
@@ -243,7 +437,7 @@ class CRCK_OT_import_clip(bpy.types.Operator):
         p = prefs()
         cw = bpy.path.abspath(p.codewalker_dir) if p and p.codewalker_dir else ""
         try:
-            made = import_clips(context, context.active_object, self.filepath, cw, self.root_motion)
+            made = import_clips(context, context.active_object, self.filepath, cw, self.root_motion, self.tolerance)
         except RuntimeError as e:
             self.report({"ERROR"}, str(e))
             return {"CANCELLED"}
