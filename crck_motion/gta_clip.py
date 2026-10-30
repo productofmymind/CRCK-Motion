@@ -119,6 +119,23 @@ class Converter:
                 if bend.length > 1e-4 and pole in pbs:  # the pole sits out along the way the joint bends
                     pbs[pole].location = rb[pole].matrix_local.to_3x3().inverted() @ (b + bend.normalized() * 0.5 - rb[pole].head_local)
         bpy.context.view_layer.update()
+        for _ in range(2):  # the rig's pole angle isn't exactly "the joint bends toward the pole": turn each pole
+            for s in "LR":  # about the root-to-end line by however far the knee or elbow missed
+                for end, _, upper, lower, pole in LIMB_ENDS:
+                    pole = pole.format(s)
+                    if pole not in pbs:
+                        continue
+                    a, c = ref[f"SKEL_{s}_{upper}"].translation, ref[f"SKEL_{s}_{end}"].translation
+                    axis = (c - a).normalized()
+                    flat = lambda p: (p - a) - axis * (p - a).dot(axis)
+                    want, got = flat(ref[f"SKEL_{s}_{lower}"].translation), flat(pbs[f"SKEL_{s}_{lower}"].head)
+                    if want.length < 1e-3 or got.length < 1e-3:
+                        continue  # straight limb: nothing to aim
+                    angle = got.angle(want) * (1 if got.cross(want).dot(axis) > 0 else -1)
+                    p = rb[pole].head_local + rb[pole].matrix_local.to_3x3() @ pbs[pole].location
+                    p = a + Matrix.Rotation(angle, 3, axis) @ (p - a)
+                    pbs[pole].location = rb[pole].matrix_local.to_3x3().inverted() @ (p - rb[pole].head_local)
+            bpy.context.view_layer.update()
         for s in "LR":  # hand and foot turn: what the clip gives them, relative to the limb as the IK placed it
             for end, tgt, _, lower, _ in LIMB_ENDS:
                 end, tgt, lower = f"SKEL_{s}_{end}", tgt.format(s), f"SKEL_{s}_{lower}"
@@ -186,8 +203,9 @@ def thin(action, tolerance=1.0):
             return len(ks)
 
 
-def import_clips(context, rig, path, codewalker="", root_motion=False, tolerance=1.0):
-    """Import every clip in a .ycd / .ycd.xml as its own control-rig action. Returns the actions."""
+def import_clips(context, rig, path, codewalker="", root_motion=False, tolerance=1.0, names=None):
+    """Import the clips in a .ycd / .ycd.xml (all, or those in `names`), each as its own control-rig action.
+    Returns the actions."""
     pkg = sollumz()
     ycdimport = importlib.import_module(pkg + ".ycd.ycdimport")
     SollumType = importlib.import_module(pkg + ".sollumz_properties").SollumType
@@ -213,7 +231,8 @@ def import_clips(context, rig, path, codewalker="", root_motion=False, tolerance
         for a in anims:
             a.animation_properties.target_id = skel.data
         conv = Converter(rig, skel)
-        clips = [o for o in cd.children_recursive if o.sollum_type == SollumType.CLIP]
+        clips = [o for o in cd.children_recursive if o.sollum_type == SollumType.CLIP
+                 and (names is None or o.clip_properties.hash in names)]
         wm.progress_begin(0, len(clips))
         for ci, clip in enumerate(clips):
             wm.progress_update(ci)
@@ -423,6 +442,9 @@ class CRCK_OT_import_clip(bpy.types.Operator):
         name="Root Motion", default=False,
         description="Keep the clip's root motion: the character moves where the game would put it. "
                     "Off: it plays where the character stands")
+    clips: bpy.props.StringProperty(
+        options={"HIDDEN", "SKIP_SAVE"},
+        description="Which clips, comma separated; '*' for all. Empty: ask when the file has more than one")
 
     @classmethod
     def poll(cls, context):
@@ -437,7 +459,13 @@ class CRCK_OT_import_clip(bpy.types.Operator):
         p = prefs()
         cw = bpy.path.abspath(p.codewalker_dir) if p and p.codewalker_dir else ""
         try:
-            made = import_clips(context, context.active_object, self.filepath, cw, self.root_motion, self.tolerance)
+            path = Path(self.filepath)
+            xml = path if path.name.lower().endswith(".xml") else ycd_to_xml(path, cw)
+            names = None if self.clips in ("", "*") else {n.strip() for n in self.clips.split(",")}
+            if not self.clips and len(clip_names(xml)) > 1:  # several clips: let the user pick
+                return bpy.ops.crck_motion.import_clip_pick("INVOKE_DEFAULT", filepath=str(xml),
+                                                            root_motion=self.root_motion, tolerance=self.tolerance)
+            made = import_clips(context, context.active_object, xml, cw, self.root_motion, self.tolerance, names)
         except RuntimeError as e:
             self.report({"ERROR"}, str(e))
             return {"CANCELLED"}
@@ -447,3 +475,38 @@ class CRCK_OT_import_clip(bpy.types.Operator):
         self.report({"INFO"}, f"Imported {len(made)} clip(s): {', '.join(a.name for a in made)}. "
                               "Switch between them in the Action editor")
         return {"FINISHED"}
+
+
+class CRCKClipChoice(bpy.types.PropertyGroup):
+    use: bpy.props.BoolProperty(default=True)
+
+
+class CRCK_OT_import_clip_pick(bpy.types.Operator):
+    """Choose which clips of the dictionary to import"""
+    bl_idname = "crck_motion.import_clip_pick"
+    bl_label = "Import GTA Clips"
+    bl_options = {"REGISTER", "UNDO", "INTERNAL"}
+
+    filepath: bpy.props.StringProperty(options={"HIDDEN"})
+    tolerance: bpy.props.FloatProperty(options={"HIDDEN"})
+    root_motion: bpy.props.BoolProperty(options={"HIDDEN"})
+    choices: bpy.props.CollectionProperty(type=CRCKClipChoice)
+
+    def invoke(self, context, event):
+        self.choices.clear()
+        for n in clip_names(self.filepath):
+            self.choices.add().name = n
+        return context.window_manager.invoke_props_dialog(self, width=360)
+
+    def draw(self, context):
+        col = self.layout.column(align=True)
+        col.label(text=f"{len(self.choices)} clips in {Path(self.filepath).name.split('.')[0]}:")
+        for c in self.choices:
+            col.prop(c, "use", text=c.name)
+
+    def execute(self, context):
+        names = [c.name for c in self.choices if c.use]
+        if not names:
+            return {"CANCELLED"}
+        return bpy.ops.crck_motion.import_clip("EXEC_DEFAULT", filepath=self.filepath, clips=",".join(names),
+                                               root_motion=self.root_motion, tolerance=self.tolerance)

@@ -284,6 +284,15 @@ if os.path.isfile(body):
           if mesh.vertex_groups[g.group].name == "SKEL_R_Hand" and g.weight > 0.5]
     check("body faces the way its skeleton does (right-hand vertices on the right)", rv and sum(v.x for v in rv) / len(rv) > 0.3,
           f"{sum(v.x for v in rv) / max(len(rv), 1):.2f}")
+    import math as _m
+    from mathutils import Matrix as _M
+    top = bodies[0]
+    while top.parent is not skel: top = top.parent
+    top.matrix_world = _M.Rotation(_m.pi, 4, "Z") @ top.matrix_world; bpy.context.view_layer.update(); crck_motion._facing.clear()
+    flagged = crck_motion.body_backwards(skel, bodies[0])
+    with bpy.context.temp_override(active_object=new):
+        bpy.ops.crck_motion.fix_body_facing()
+    check("a backwards body is flagged and Fix Body Facing turns it back", flagged and not crck_motion.body_backwards(skel, bodies[0]))
     check("no extra armatures", sum(o.type == "ARMATURE" for o in bpy.data.objects if o.users_scene) == 2)
     mesh, vl = bodies[0], bpy.context.view_layer
     co = lambda: [v.co.copy() for v in mesh.evaluated_get(bpy.context.evaluated_depsgraph_get()).data.vertices]

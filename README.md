@@ -31,8 +31,9 @@ CRCK Motion is pure Python. It uses only what ships with Blender (numpy included
 
 1. **Add Freemode Rig**, or select a control rig built the same way (bone names `SKEL_*`, IK targets `IK_L_FA` / `IK_R_FA`, `LEG_L_IK` / `LEG_R_IK`, knee poles `LEG_L_POLE` / `LEG_R_POLE`).
 2. **Import Body**: pick a `.blend` that has the ped mesh skinned to its skeleton (for example your own `Freemode_M_IK_Fixed.blend`). The mesh is bound to the game skeleton so you see it deform. The file is remembered (Preferences > Add-ons > CRCK Motion > Body File), and **Add Freemode Rig** imports it every time after that. No Rockstar mesh ships with the add-on.
-3. Rig without elbow poles? Click **Add Elbow Poles** once. It adds a pole bone behind each elbow on the control rig, fitted so the pose doesn't move. The game skeleton is not touched. The bundled rig already has them.
-4. Click **Autopose**. Dots sit on the body: hips (purple square), chest and head (green), hands, feet, elbows and knees (yellow is left, red is right), the look-at (green), and an orange ring on the floor. A solid dot holds its place in the world; a ring rides with the body or aims a joint.
+3. If the panel says **The body faces away from its skeleton** (scenes made with an older Add Freemode Rig), click **Fix Body Facing**: a backwards body deforms into long spikes.
+4. Rig without elbow poles? Click **Add Elbow Poles** once. It adds a pole bone behind each elbow on the control rig, fitted so the pose doesn't move. The game skeleton is not touched. The bundled rig already has them.
+5. Click **Autopose**. Dots sit on the body: hips (purple square), chest and head (green), hands, feet, elbows and knees (yellow is left, red is right), the look-at (green), and an orange ring on the floor. A solid dot holds its place in the world; a ring rides with the body or aims a joint.
 
 | In Autopose | What it does |
 |---|---|
@@ -53,8 +54,8 @@ CRCK Motion is pure Python. It uses only what ships with Blender (numpy included
 
 Clicks away from the handles behave as normal in Blender. Each drag is one undo step.
 
-3. Key the pose with **Key Pose**, or switch on Auto Keying so every drag is keyed and carried into the keys within **Reach** frames.
-4. **Bake to Game Skeleton** bakes the scene's frame range onto `skel`. Then export with Sollumz.
+6. Key the pose with **Key Pose**, or switch on Auto Keying so every drag is keyed and carried into the keys within **Reach** frames.
+7. **Export GTA Clip** saves the scene's frame range as a `.ycd` for the game (or **Bake to Game Skeleton** and export with Sollumz yourself).
 
 ## Presets
 
@@ -77,9 +78,10 @@ Your own presets are saved in Blender's extension user folder (`extensions/.user
 
 - **Sollumz** has to be installed: it reads the clip dictionary.
 - **Binary `.ycd`** is read through your own **CodeWalker** install: set its folder once in Preferences > Add-ons > CRCK Motion > CodeWalker Folder. CRCK Motion builds a small helper (`ycdtool.cs`, using the C# compiler that comes with Windows) that asks CodeWalker to turn the file into `.ycd.xml`. No CodeWalker code ships with the add-on. A `.ycd.xml` needs none of this.
+- A dictionary with several clips asks which to import (all ticked to start with).
 - **Root Motion** (in the file browser's side panel): off, the clip plays where your character stands; on, the character moves where the game would put it (for a seated clip that is the seat's spot).
-- How it converts: the game skeleton plays the clip, then each frame is written onto the control rig. Plain bones (spine, neck, head, fingers, pelvis, toes) copy their turn; hands and feet get their IK targets; elbows and knees get their poles. Hands, feet, head and pelvis land within 0.01 cm of the clip.
-- Known gaps: an arm's twist along its length can differ from the clip (the IK decides it), knees can be a few cm off, and facial tracks are skipped.
+- How it converts: the game skeleton plays the clip, then each frame is written onto the control rig. Plain bones (spine, neck, head, fingers, pelvis, toes) copy their turn; hands and feet get their IK targets; elbows and knees get their poles, turned until the joint lands where the clip has it. Hands, feet, elbows, knees and head land within 0.01 cm of the clip.
+- Known gaps: an arm's twist along its length can differ from the clip (the IK decides it), and facial tracks are skipped.
 
 ## Export GTA Clip
 

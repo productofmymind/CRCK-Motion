@@ -1,6 +1,8 @@
+import math
 from pathlib import Path
 
 import bpy
+from mathutils import Matrix
 
 from . import autopose, gta_clip, presets
 from .autopose import LIMBS, is_ped_rig
@@ -76,8 +78,64 @@ def body_path():
 
 
 def has_body(skel):
-    return any(m.type == "ARMATURE" and m.object is skel for ob in bpy.data.objects
-               if ob.type == "MESH" for m in ob.modifiers)
+    return bool(body_meshes(skel))
+
+
+def body_meshes(skel):
+    return [ob for ob in bpy.data.objects if ob.type == "MESH"
+            and any(m.type == "ARMATURE" and m.object is skel for m in ob.modifiers)]
+
+
+_facing = {}  # (mesh, its placement) -> backwards? Reading vertices is too slow to repeat on every panel draw
+
+
+def body_backwards(skel, mesh):
+    """True when the body faces away from its skeleton: its right-hand vertices sit on the skeleton's left.
+    Scenes made by Add Freemode Rig before 0.2 can have this; every bone then deforms its vertices from a
+    pivot on the wrong side of the body."""
+    key = (mesh.as_pointer(), skel.as_pointer(), tuple(mesh.matrix_world.col[0]), tuple(skel.matrix_world.col[0]))
+    if key not in _facing:
+        g, bone = mesh.vertex_groups.get("SKEL_R_Hand"), skel.data.bones.get("SKEL_R_Hand")
+        xs = []
+        if g and bone:
+            to_arm = skel.matrix_world.inverted() @ mesh.matrix_world
+            for v in mesh.data.vertices:
+                if any(e.group == g.index and e.weight > 0.5 for e in v.groups):
+                    xs.append((to_arm @ v.co).x)
+                    if len(xs) == 20:
+                        break
+        _facing[key] = bool(xs) and sum(xs) / len(xs) * bone.head_local.x < 0
+    return _facing[key]
+
+
+class CRCK_OT_fix_body_facing(bpy.types.Operator):
+    """Turn the body to face the way its skeleton does (it was imported backwards, so it deforms into spikes)"""
+    bl_idname = "crck_motion.fix_body_facing"
+    bl_label = "Fix Body Facing"
+    bl_options = {"REGISTER", "UNDO"}
+
+    @classmethod
+    def poll(cls, context):
+        return is_ped_rig(context.active_object) and find_game_skel(context.active_object) is not None
+
+    def execute(self, context):
+        skel = find_game_skel(context.active_object)
+        turned = set()
+        for mesh in body_meshes(skel):
+            if not body_backwards(skel, mesh):
+                continue
+            top = mesh
+            while top.parent and top.parent is not skel:
+                top = top.parent
+            if top in turned:
+                continue
+            S = skel.matrix_world
+            top.matrix_world = S @ Matrix.Rotation(math.pi, 4, "Z") @ S.inverted() @ top.matrix_world
+            turned.add(top)
+        context.view_layer.update()
+        _facing.clear()
+        self.report({"INFO"}, f"Turned {', '.join(o.name for o in turned)}" if turned else "The body already faces the right way")
+        return {"FINISHED"}
 
 
 def import_body(context, path, rig):
@@ -332,6 +390,11 @@ class CRCK_PT_panel(bpy.types.Panel):
         skel = find_game_skel(rig)
         if skel and not has_body(skel):
             layout.operator(CRCK_OT_import_body.bl_idname, icon="OUTLINER_OB_MESH")
+        elif skel and any(body_backwards(skel, m) for m in body_meshes(skel)):
+            box = layout.box()
+            box.alert = True
+            box.label(text="The body faces away from its skeleton", icon="ERROR")
+            box.operator(CRCK_OT_fix_body_facing.bl_idname, icon="FILE_REFRESH")
         if "POLE_L_FA" not in rig.data.bones or "POLE_R_FA" not in rig.data.bones:
             layout.operator(CRCK_OT_add_elbow_poles.bl_idname, icon="CON_KINEMATIC")
         running = autopose._running is not None
@@ -363,9 +426,9 @@ class CRCK_PT_panel(bpy.types.Panel):
         layout.operator(gta_clip.CRCK_OT_export_clip.bl_idname, icon="EXPORT")
 
 
-classes = (CRCKMotionSettings, CRCKMotionPreferences, CRCK_OT_import_body, CRCK_OT_add_elbow_poles,
+classes = (CRCKMotionSettings, CRCKMotionPreferences, CRCK_OT_import_body, CRCK_OT_fix_body_facing, CRCK_OT_add_elbow_poles,
            CRCK_OT_add_rig, CRCK_OT_key_pose,
-           CRCK_OT_toggle_pin, CRCK_OT_bake, autopose.CRCK_OT_autopose, gta_clip.CRCK_OT_import_clip, gta_clip.CRCK_OT_thin_keys, gta_clip.CRCK_OT_export_clip, CRCK_PT_panel, *presets.classes)
+           CRCK_OT_toggle_pin, CRCK_OT_bake, autopose.CRCK_OT_autopose, gta_clip.CRCKClipChoice, gta_clip.CRCK_OT_import_clip_pick, gta_clip.CRCK_OT_import_clip, gta_clip.CRCK_OT_thin_keys, gta_clip.CRCK_OT_export_clip, CRCK_PT_panel, *presets.classes)
 
 
 def register():
