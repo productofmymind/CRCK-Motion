@@ -2,7 +2,7 @@
 
 **CRCK Motion** is a Blender add-on for posing and animating the GTA V Freemode ped by hand. Drag a hand or foot and only that limb moves, like dragging the rig's own IK target; drag the hips, chest or head and the body follows, with the feet kept planted. Start from a preset or a real game animation, edit it with the same handles, and export it as a `.ycd` for the game. Every pose lands as ordinary keyframes on the control rig, and a click bakes it onto the game skeleton, ready to export with [Sollumz](https://github.com/Sollumz/Sollumz).
 
-**Version 0.2.0** · Blender 4.4+ (tested on 5.2.3) · Windows, macOS and Linux (importing a binary `.ycd` is Windows only) · GPL-3.0-or-later
+**Version 0.3.0** · Blender 4.4+ (tested on 5.2.3) · Windows, macOS and Linux · GPL-3.0-or-later
 
 > Covered by an automated test: the Autopose solver, keying, presets, clip import and export, thinning, bake and rig import. Not yet checked: playing an exported `.ycd` in the game itself, and the viewport handles have not had much hands-on use, so please report anything odd in the Issues tab.
 
@@ -25,7 +25,7 @@
 2. In Blender, go to Edit > Preferences > Get Extensions > the arrow menu > **Install from Disk** and pick the zip.
 3. Everything is in one tab of the 3D Viewport sidebar (press **N**): **CRCK Motion**.
 
-CRCK Motion is pure Python. It uses only what ships with Blender (numpy included), so there's nothing else to install. Sollumz is only needed when you export.
+CRCK Motion is pure Python. Posing, presets, keys and the bake use only what ships with Blender (numpy included). Working with GTA clips also needs [Sollumz](https://github.com/Sollumz/Sollumz) and CRCK Explorer (see Import GTA Clip below).
 
 ## How to use it
 
@@ -77,10 +77,10 @@ Your own presets are saved in Blender's extension user folder (`extensions/.user
 
 ## Import GTA Clip
 
-**Import GTA Clip** (in the main panel) takes a clip dictionary, either the game's binary `.ycd` or a CodeWalker `.ycd.xml`, and turns every clip in it into an action on the control rig, ready to edit with Autopose, Reach, the Dope Sheet or the Graph Editor. **Key Tolerance** (default 1: within 5 mm, about 1 degree) thins the keys to the fewest whole poses that stay that close to the clip; a typical idle goes from 139 keys to 27. 0 keeps a key on every frame. Switch between the clips in the Action editor. **Save Preset** with **Animation** ticked keeps one as a preset.
+**Import GTA Clip** (in the main panel) takes a clip dictionary, either the game's binary `.ycd` or a `.ycd.xml`, and turns every clip in it into an action on the control rig, ready to edit with Autopose, Reach, the Dope Sheet or the Graph Editor. **Key Tolerance** (default 1: within 5 mm, about 1 degree) thins the keys to the fewest whole poses that stay that close to the clip; a typical idle goes from 139 keys to 27. 0 keeps a key on every frame. Switch between the clips in the Action editor. **Save Preset** with **Animation** ticked keeps one as a preset.
 
 - **Sollumz** has to be installed: it reads the clip dictionary.
-- **Binary `.ycd`** is read through your own **CodeWalker** install: set its folder once in Preferences > Add-ons > CRCK Motion > CodeWalker Folder. CRCK Motion builds a small helper (`ycdtool.cs`, using the C# compiler that comes with Windows) that asks CodeWalker to turn the file into `.ycd.xml`. No CodeWalker code ships with the add-on. A `.ycd.xml` needs none of this.
+- **Binary `.ycd`** is read and written by **CRCK Explorer** (`crck-explorer-cli ycd to-xml` and `from-xml`): set the path to `crck-explorer-cli.exe` once in Preferences > Add-ons > CRCK Motion > CRCK Explorer. A `.ycd.xml` file needs no converter at all.
 - **Browse Game Clips** lists every in-game animation dictionary in your own GTA V files (about 11,000) in a searchable popup: type a few words (`cop idles`, `mime`, `sit chair`), pick one, and it is extracted and imported. The button next to it re-reads the game after an update. It uses **CRCK Explorer**: set the path to `crck-explorer-cli.exe` in Preferences > Add-ons > CRCK Motion > CRCK Explorer. When a name is in more than one archive (a patch or DLC copy), the one the game uses, the later archive, is listed. Cutscene dictionaries aren't listed: they are built for their own scene skeletons.
 - A dictionary with several clips asks which to import (all ticked to start with).
 - **Root Motion** (in the file browser's side panel): off, the clip plays where your character stands; on, the character moves where the game would put it (for a seated clip that is the seat's spot).
@@ -89,7 +89,7 @@ Your own presets are saved in Blender's extension user folder (`extensions/.user
 
 ## Export GTA Clip
 
-**Export GTA Clip** bakes the scene's frame range onto the game skeleton and saves it as a clip dictionary with one clip in it. Name the file (`.ycd`, or `.ycd.xml` for CodeWalker) and the clip (the name you play it by in the game). Scale, and bones that never leave their rest pose, are left out, as the game's own clips do. Writing binary `.ycd` uses your CodeWalker install, like importing it.
+**Export GTA Clip** bakes the scene's frame range onto the game skeleton and saves it as a clip dictionary with one clip in it. Name the file (`.ycd`, or `.ycd.xml`) and the clip (the name you play it by in the game). Scale, and bones that never leave their rest pose, are left out, as the game's own clips do. Writing binary `.ycd` uses CRCK Explorer, like importing it.
 
 Round trip on a game idle: imported, thinned, exported to `.ycd` and imported again, it lands within 0.06 cm of the original clip typically, 0.84 cm at the worst point.
 
@@ -101,7 +101,6 @@ When you drag the hips, chest or head (or Ctrl-drag a hand or foot), a small sol
 
 ## Known gaps
 
-- Binary `.ycd` import is Windows only (it uses CodeWalker and the .NET Framework compiler that comes with Windows). On macOS and Linux, export the clip to `.ycd.xml` with CodeWalker first.
 - Not built yet: lock in place, motion trail and smoothing brush. Reach only moves keys that already exist.
 - Only the Freemode male rig is bundled.
 

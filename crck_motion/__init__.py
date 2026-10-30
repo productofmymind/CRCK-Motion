@@ -57,19 +57,13 @@ class CRCKMotionPreferences(bpy.types.AddonPreferences):
         name="Body File", subtype="FILE_PATH",
         description="A .blend with the ped mesh bound to its skeleton (e.g. Freemode_M_IK_Fixed.blend). "
                     "Add Freemode Rig imports the body from it")
-    codewalker_dir: bpy.props.StringProperty(
-        name="CodeWalker Folder", subtype="DIR_PATH",
-        description="Your CodeWalker install (the folder with CodeWalker.Core.dll). Import GTA Clip uses it to "
-                    "read binary .ycd files; .ycd.xml files don't need it")
-
     explorer_cli: bpy.props.StringProperty(
         name="CRCK Explorer", subtype="FILE_PATH",
-        description="crck-explorer-cli.exe from CRCK Explorer. Browse Game Clips uses it to list and extract the "
-                    "animation dictionaries in your own GTA V files")
+        description="crck-explorer-cli.exe from CRCK Explorer. It reads and writes .ycd files and lists and extracts "
+                    "the animation dictionaries in your own GTA V files")
 
     def draw(self, context):
         self.layout.prop(self, "body_path")
-        self.layout.prop(self, "codewalker_dir")
         self.layout.prop(self, "explorer_cli")
 
 

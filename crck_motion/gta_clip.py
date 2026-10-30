@@ -1,7 +1,7 @@
-"""Import GTA V clips (.ycd or .ycd.xml) as editable control-rig actions.
+"""Import GTA V clips (.ycd or .ycd.xml) as editable control-rig actions, and export them again.
 
-A binary .ycd is turned into .ycd.xml by a small helper (ycdtool.cs) that drives the user's own CodeWalker
-install; Sollumz imports the XML and plays it on the game skeleton; each frame is then converted onto the control
+A binary .ycd is converted to and from .ycd.xml by CRCK Explorer (`crck-explorer-cli ycd to-xml` and `from-xml`);
+Sollumz imports the XML and plays it on the game skeleton; each frame is then converted onto the control
 rig: plain bones copy their turn, hands and feet get their IK targets, elbows and knees their poles.
 """
 
@@ -21,47 +21,46 @@ from mathutils import Matrix, Vector
 
 from . import autopose as ap, presets as pr
 
-HELPER_SRC = Path(__file__).parent / "ycdtool.cs"
-NO_WINDOW = getattr(subprocess, "CREATE_NO_WINDOW", 0)
-CSC = Path(os.environ.get("WINDIR", r"C:\Windows")) / "Microsoft.NET" / "Framework64" / "v4.0.30319" / "csc.exe"
+NO_WINDOW = getattr(subprocess, "CREATE_NO_WINDOW", 0)  # no console window flashing up when Blender runs the tool
 LIMB_ENDS = [("Hand", "IK_{}_FA", "UpperArm", "Forearm", "POLE_{}_FA"),
              ("Foot", "LEG_{}_IK", "Thigh", "Calf", "LEG_{}_POLE")]
 
 
-# --- .ycd -> .ycd.xml ---------------------------------------------------------------------------
-def helper_exe():
-    """Build the helper with the C# compiler that comes with Windows, once (again when its source changes)."""
-    out = Path(bpy.utils.extension_path_user(__package__, path="bin", create=True)) / "ycdtool.exe"
-    if out.exists() and out.stat().st_mtime >= HELPER_SRC.stat().st_mtime:
-        return out
-    if not CSC.exists():
-        raise RuntimeError("Reading .ycd needs the .NET Framework C# compiler, which wasn't found. "
-                           "Export the clip to .ycd.xml with CodeWalker and import that instead")
-    r = subprocess.run([str(CSC), "-nologo", f"-out:{out}", "-r:System.Xml.dll", "-r:System.Core.dll", str(HELPER_SRC)],
-                       capture_output=True, text=True, creationflags=NO_WINDOW)
+# --- CRCK Explorer ------------------------------------------------------------------------------
+def explorer_cli(configured=""):
+    """CRCK Explorer's command line: the preference, else one on PATH."""
+    cli = Path(bpy.path.abspath(configured)) if configured else None
+    if cli and cli.is_file():
+        return cli
+    found = shutil.which("crck-explorer-cli")
+    if found:
+        return Path(found)
+    raise RuntimeError("CRCK Motion uses CRCK Explorer to read and write .ycd files and to browse the game's clips: "
+                       "set the path to crck-explorer-cli.exe in Preferences > Add-ons > CRCK Motion > CRCK Explorer")
+
+
+def cli_from_prefs():
+    from . import prefs
+    p = prefs()
+    return explorer_cli(p.explorer_cli if p else "")
+
+
+def run_cli(*args):
+    r = subprocess.run([str(cli_from_prefs()), *map(str, args)], capture_output=True, text=True, creationflags=NO_WINDOW)
     if r.returncode:
-        raise RuntimeError("Couldn't build the .ycd helper: " + (r.stdout + r.stderr).strip()[-400:])
-    return out
+        raise RuntimeError(f"CRCK Explorer: {(r.stderr or r.stdout).strip()[-400:] or 'failed'}")
+    return r.stdout
 
 
-def ycd_to_xml(path, codewalker):
-    if not codewalker or not (Path(codewalker) / "CodeWalker.Core.dll").exists():
-        raise RuntimeError("Reading .ycd uses your CodeWalker install: set its folder in "
-                           "Preferences > Add-ons > CRCK Motion > CodeWalker Folder (or import a .ycd.xml)")
+# --- .ycd <-> .ycd.xml ----------------------------------------------------------------------------
+def ycd_to_xml(path):
     out = Path(tempfile.mkdtemp(prefix="crck_ycd_")) / (Path(path).stem + ".ycd.xml")
-    r = subprocess.run([str(helper_exe()), str(codewalker), "to-xml", str(path), str(out)], capture_output=True, text=True, creationflags=NO_WINDOW)
-    if r.returncode:
-        raise RuntimeError(f"CodeWalker couldn't read {Path(path).name}: {r.stderr.strip()}")
+    run_cli("ycd", "to-xml", path, out)
     return out
 
 
-def xml_to_ycd(xml, out, codewalker):
-    if not codewalker or not (Path(codewalker) / "CodeWalker.Core.dll").exists():
-        raise RuntimeError("Writing .ycd uses your CodeWalker install: set its folder in "
-                           "Preferences > Add-ons > CRCK Motion > CodeWalker Folder (or export a .ycd.xml)")
-    r = subprocess.run([str(helper_exe()), str(codewalker), "to-ycd", str(xml), str(out)], capture_output=True, text=True, creationflags=NO_WINDOW)
-    if r.returncode:
-        raise RuntimeError(f"CodeWalker couldn't write {Path(out).name}: {r.stderr.strip()}")
+def xml_to_ycd(xml, out):
+    run_cli("ycd", "from-xml", xml, out)
 
 
 def clip_names(xml_path):
@@ -206,14 +205,14 @@ def thin(action, tolerance=1.0):
             return len(ks)
 
 
-def import_clips(context, rig, path, codewalker="", root_motion=False, tolerance=1.0, names=None):
+def import_clips(context, rig, path, root_motion=False, tolerance=1.0, names=None):
     """Import the clips in a .ycd / .ycd.xml (all, or those in `names`), each as its own control-rig action.
     Returns the actions."""
     pkg = sollumz()
     ycdimport = importlib.import_module(pkg + ".ycd.ycdimport")
     SollumType = importlib.import_module(pkg + ".sollumz_properties").SollumType
     path = Path(path)
-    xml = path if path.name.lower().endswith(".xml") else ycd_to_xml(path, codewalker)
+    xml = path if path.name.lower().endswith(".xml") else ycd_to_xml(path)
     dict_name = path.name.split(".")[0]
     scene, vl = context.scene, context.view_layer
     skel = game_skel(rig)
@@ -322,7 +321,7 @@ def tidy_baked(action):
                     bag.fcurves.remove(fc)
 
 
-def export_clip(context, rig, filepath, name, codewalker=""):
+def export_clip(context, rig, filepath, name):
     """Bake the scene's frame range onto the game skeleton and write it as a one-clip dictionary."""
     pkg = sollumz()
     ycdimport = importlib.import_module(pkg + ".ycd.ycdimport")
@@ -359,7 +358,7 @@ def export_clip(context, rig, filepath, name, codewalker=""):
         if not ycdexport.export_ycd(cd, str(xml)):
             raise RuntimeError("Sollumz couldn't export the clip (see the Info editor)")
         if not as_xml:
-            xml_to_ycd(xml, filepath, codewalker)
+            xml_to_ycd(xml, filepath)
     finally:
         for o in made:
             bpy.data.objects.remove(o)
@@ -392,13 +391,10 @@ class CRCK_OT_export_clip(bpy.types.Operator):
         return {"RUNNING_MODAL"}
 
     def execute(self, context):
-        from . import prefs
-        p = prefs()
-        cw = bpy.path.abspath(p.codewalker_dir) if p and p.codewalker_dir else ""
         if not self.filepath.lower().endswith((".ycd", ".xml")):
             self.filepath += ".ycd"
         try:
-            out = export_clip(context, context.active_object, self.filepath, self.clip_name or "clip", cw)
+            out = export_clip(context, context.active_object, self.filepath, self.clip_name or "clip")
         except RuntimeError as e:
             self.report({"ERROR"}, str(e))
             return {"CANCELLED"}
@@ -458,17 +454,14 @@ class CRCK_OT_import_clip(bpy.types.Operator):
         return {"RUNNING_MODAL"}
 
     def execute(self, context):
-        from . import prefs
-        p = prefs()
-        cw = bpy.path.abspath(p.codewalker_dir) if p and p.codewalker_dir else ""
         try:
             path = Path(self.filepath)
-            xml = path if path.name.lower().endswith(".xml") else ycd_to_xml(path, cw)
+            xml = path if path.name.lower().endswith(".xml") else ycd_to_xml(path)
             names = None if self.clips in ("", "*") else {n.strip() for n in self.clips.split(",")}
             if not self.clips and len(clip_names(xml)) > 1:  # several clips: let the user pick
                 return bpy.ops.crck_motion.import_clip_pick("INVOKE_DEFAULT", filepath=str(xml),
                                                             root_motion=self.root_motion, tolerance=self.tolerance)
-            made = import_clips(context, context.active_object, xml, cw, self.root_motion, self.tolerance, names)
+            made = import_clips(context, context.active_object, xml, self.root_motion, self.tolerance, names)
         except RuntimeError as e:
             self.report({"ERROR"}, str(e))
             return {"CANCELLED"}
@@ -482,18 +475,6 @@ class CRCK_OT_import_clip(bpy.types.Operator):
 
 # --- browsing the game's own clips ----------------------------------------------------------------
 _items = []  # enum items must outlive the callback or Blender shows garbage
-
-
-def explorer_cli(configured=""):
-    """CRCK Explorer's command line: the preference, else one on PATH."""
-    cli = Path(bpy.path.abspath(configured)) if configured else None
-    if cli and cli.is_file():
-        return cli
-    found = shutil.which("crck-explorer-cli")
-    if found:
-        return Path(found)
-    raise RuntimeError("Browsing the game's clips uses CRCK Explorer: set the path to crck-explorer-cli.exe in "
-                       "Preferences > Add-ons > CRCK Motion > CRCK Explorer")
 
 
 def parse_index(text):
