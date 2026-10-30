@@ -1,9 +1,9 @@
 schema_version = "1.0.0"
 
 id = "crck_motion"
-version = "0.1.0"
+version = "0.2.0"
 name = "CRCK Motion"
-tagline = "Drag a hand or foot and the GTA V ped body follows"
+tagline = "Pose and animate the GTA V ped: drag a dot, edit real game clips"
 maintainer = "productofmymind"
 type = "add-on"
 website = "https://github.com/productofmymind/CRCK-Motion"
@@ -12,4 +12,4 @@ license = ["SPDX:GPL-3.0-or-later"]
 tags = ["Animation", "Rigging"]
 
 [permissions]
-files = "Import the ped body from a .blend and save pose presets"
+files = "Read the ped body, import and export clips, save presets"

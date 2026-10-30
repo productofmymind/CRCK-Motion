@@ -1,17 +1,17 @@
 # CRCK Motion
 
-**CRCK Motion** is a Blender add-on for posing and animating the GTA V Freemode ped by hand. Drag a hand, a foot or the hips, and the body follows: the torso leans, twists and drops so the limbs you've pinned can still reach, and the rig's own IK does the arms and legs. Every pose lands as ordinary keyframes on the control rig. When you're done, one click bakes it onto the game skeleton, ready to export with [Sollumz](https://github.com/Sollumz/Sollumz).
+**CRCK Motion** is a Blender add-on for posing and animating the GTA V Freemode ped by hand. Drag a hand or foot and only that limb moves, like dragging the rig's own IK target; drag the hips, chest or head and the body follows, with the feet kept planted. Start from a preset or a real game animation, edit it with the same handles, and export it as a `.ycd` for the game. Every pose lands as ordinary keyframes on the control rig, and a click bakes it onto the game skeleton, ready to export with [Sollumz](https://github.com/Sollumz/Sollumz).
 
-**Version 0.1.0** · Blender 4.4+ (tested on 5.2.3) · Windows, macOS and Linux · GPL-3.0-or-later
+**Version 0.2.0** · Blender 4.4+ (tested on 5.2.3) · Windows, macOS and Linux (importing a binary `.ycd` is Windows only) · GPL-3.0-or-later
 
-> First release. The solver, keying, bake and rig import are covered by an automated test. The viewport handles have not had much hands-on use yet, so please report anything odd in the Issues tab.
+> Covered by an automated test: the Autopose solver, keying, presets, clip import and export, thinning, bake and rig import. Not yet checked: playing an exported `.ycd` in the game itself, and the viewport handles have not had much hands-on use, so please report anything odd in the Issues tab.
 
 ## What it does
 
 | You want to... | CRCK Motion gives you |
 |---|---|
 | Start from a ready rig | **Add Freemode Rig**: the Freemode male control rig and its game skeleton (`skel`), bundled in the add-on. No ped mesh is included (it is Rockstar's): import your ped with Sollumz and bind it to `skel` to see it |
-| Pose without rotating bone by bone | **Autopose**: drag handles on the hips, hands, feet, knees and a look-at target. The body follows |
+| Pose without rotating bone by bone | **Autopose**: drag handles on the hips, chest, head, hands, feet, knees, elbows and a look-at target. Hands and feet move just their limb; the hips, chest and head bring the body |
 | Keep a foot planted, or let a hand ride along | **Pinned or carried** per hand and foot (**P** over a handle) |
 | Change one frame without breaking the motion | **Reach**: with Auto Keying on, an edit fades into the keys around it (Smooth, Hold, Linear or Sharp falloff) |
 | Start from a pose instead of a T-pose | **Presets**: a thumbnail browser for saved poses and animations. Preview, blend, mirror, apply, and save your own |
@@ -97,7 +97,7 @@ Round trip on a game idle: imported, thinned, exported to `.ycd` and imported ag
 
 Each control-rig bone drives the matching `skel` bone through Copy Transforms. The game only ever sees `skel`, and CRCK Motion adds no bones to it.
 
-When you drag, a small solver (damped least squares) finds how far the hips should move and turn, how much the spine should bend and how far the collarbones should shift, so that every pinned hand and foot stays within reach of its limb. A pin always wins over a hips drag. The IK constraints already on the rig then place the arms and legs. A solve takes about 5 to 10 ms.
+When you drag the hips, chest or head (or Ctrl-drag a hand or foot), a small solver (damped least squares) finds how far the hips should move and turn, how much the spine should bend and how far the collarbones should shift, so that every pinned hand and foot stays within reach of its limb. A pin always wins over a hips drag. The IK constraints already on the rig then place the arms and legs. A solve takes about 5 to 10 ms.
 
 ## Known gaps
 
