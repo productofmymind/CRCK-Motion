@@ -1,5 +1,6 @@
-"""Autopose: drag a handle, solve the torso so the pinned limbs can still reach, let the rig's IK do the limbs."""
+"""Autopose: drag or turn a handle, solve the torso so the pinned limbs can still reach, let the rig's IK do the limbs."""
 
+import math
 import re
 
 import bpy
@@ -7,7 +8,7 @@ import gpu
 import numpy as np
 from bpy_extras import anim_utils, view3d_utils
 from gpu_extras.batch import batch_for_shader
-from mathutils import Matrix, Quaternion, Vector
+from mathutils import Matrix, Quaternion, Vector, geometry
 
 TORSO = [
     "SKEL_ROOT", "SKEL_Pelvis", "SKEL_L_Thigh", "SKEL_R_Thigh",
@@ -17,39 +18,93 @@ TORSO = [
 ]
 SPINE = ["SKEL_Spine0", "SKEL_Spine1", "SKEL_Spine2", "SKEL_Spine3"]
 
-# handle -> control bone it moves
-HANDLE_BONES = {
-    "hips": "SKEL_ROOT",
+# IK target handle -> the control bone it moves
+TARGET_BONES = {
     "hand_l": "IK_L_FA", "hand_r": "IK_R_FA",
     "foot_l": "LEG_L_IK", "foot_r": "LEG_R_IK",
     "knee_l": "LEG_L_POLE", "knee_r": "LEG_R_POLE",
+    "elbow_l": "POLE_L_FA", "elbow_r": "POLE_R_FA",  # optional: older rigs have no arm poles
 }
-TARGETS = [k for k in HANDLE_BONES if k != "hips"]
+OPTIONAL = {"elbow_l", "elbow_r"}
+# where each handle is drawn: on the body, not on the control bone (a pole floats away from the limb)
+DRAWN_AT = {"hips": "SKEL_ROOT", "chest": "SKEL_Spine3", "head": "SKEL_Head",
+            "hand_l": "IK_L_FA", "hand_r": "IK_R_FA", "foot_l": "LEG_L_IK", "foot_r": "LEG_R_IK",
+            "knee_l": "SKEL_L_Calf", "knee_r": "SKEL_R_Calf",
+            "elbow_l": "SKEL_L_Forearm", "elbow_r": "SKEL_R_Forearm"}
 LIMBS = {
     "hand_l": ("SKEL_L_UpperArm", "SKEL_L_Forearm"), "hand_r": ("SKEL_R_UpperArm", "SKEL_R_Forearm"),
     "foot_l": ("SKEL_L_Thigh", "SKEL_L_Calf"), "foot_r": ("SKEL_R_Thigh", "SKEL_R_Calf"),
 }
+OTHER_HAND = {"hand_l": "hand_r", "hand_r": "hand_l"}
+# pole handle -> (limb root bone, end handle): dragging it points the knee or elbow
+BENDS = {"knee_l": ("SKEL_L_Thigh", "foot_l"), "knee_r": ("SKEL_R_Thigh", "foot_r"),
+         "elbow_l": ("SKEL_L_UpperArm", "hand_l"), "elbow_r": ("SKEL_R_UpperArm", "hand_r")}
+# dragging these pulls a torso bone toward the mouse
+GOAL_BONES = {"hips": "SKEL_ROOT", "chest": "SKEL_Spine3", "head": "SKEL_Head"}
 # a target that isn't pinned rides along with this torso bone
 CARRY = {"hand_l": "SKEL_Spine3", "hand_r": "SKEL_Spine3",
          "foot_l": "SKEL_Pelvis", "foot_r": "SKEL_Pelvis",
-         "knee_l": "SKEL_Pelvis", "knee_r": "SKEL_Pelvis"}
-# everything a pose writes, so everything Key Pose keys
-KEYED = ["SKEL_ROOT", *SPINE, "SKEL_L_Clavicle", "SKEL_R_Clavicle", "SKEL_Neck_1", "SKEL_Head",
-         *(HANDLE_BONES[k] for k in TARGETS)]
-REQUIRED = set(TORSO) | set(HANDLE_BONES.values()) | {"SKEL_L_Forearm", "SKEL_R_Forearm", "SKEL_L_Calf", "SKEL_R_Calf"}
+         "knee_l": "SKEL_Pelvis", "knee_r": "SKEL_Pelvis",
+         "elbow_l": "SKEL_Spine3", "elbow_r": "SKEL_Spine3"}
+TURNABLE = {"hand_l", "hand_r", "foot_l", "foot_r", "hips", "chest", "root"}
+BODY_BONES = ["SKEL_ROOT", *SPINE, "SKEL_L_Clavicle", "SKEL_R_Clavicle", "SKEL_Neck_1", "SKEL_Head"]
+REQUIRED = set(TORSO) | {TARGET_BONES[k] for k in TARGET_BONES if k not in OPTIONAL} | {
+    "SKEL_L_Forearm", "SKEL_R_Forearm", "SKEL_L_Calf", "SKEL_R_Calf"}
 
-# rig colour convention: yellow left, red right, purple lower body, green look
-COLORS = {"hips": (0.7, 0.35, 1, 1), "hand_l": (1, 0.85, 0.1, 1), "hand_r": (1, 0.2, 0.2, 1),
-          "foot_l": (1, 0.85, 0.1, 1), "foot_r": (1, 0.2, 0.2, 1),
-          "knee_l": (1, 0.85, 0.1, 0.6), "knee_r": (1, 0.2, 0.2, 0.6), "look": (0.3, 1, 0.4, 1)}
+# rig colour convention: yellow left, red right, purple lower body, green upper body
+YELLOW, RED = (1, 0.85, 0.1, 1), (1, 0.25, 0.25, 1)
+COLORS = {"hips": (0.75, 0.4, 1, 1), "chest": (0.35, 0.9, 0.45, 1), "head": (0.35, 0.9, 0.45, 1),
+          "look": (0.35, 0.9, 0.45, 1), "root": (1, 0.6, 0.1, 1),
+          "hand_l": YELLOW, "foot_l": YELLOW, "knee_l": YELLOW, "elbow_l": YELLOW,
+          "hand_r": RED, "foot_r": RED, "knee_r": RED, "elbow_r": RED}
+RINGS = {"knee_l", "knee_r", "elbow_l", "elbow_r", "look"}  # drawn as rings: they aim, they don't hold
+FLOOR_BELOW_ANKLE = 0.09  # foot bone head sits this far above the sole
+ROOT_RADIUS = 0.45
 
-# solver parameter layout: root move(3) root turn(3) spine bend(3) clavicles(3+3), with stiffness per param
-PARAM_W = np.array([2, 2, 2, 3, 3, 3, 1, 1, 1, 6, 6, 6, 6, 6, 6], float)
+# solver parameter layout: root move(3) root turn(3) spine bend(3) clavicles(3+3), with stiffness per param.
+# Cheapest first, like a person reaching: shoulder, then spine, the hips last.
+# Root move is per metre, the rest per radian: 6 cm of hips must cost more than 20 degrees of shoulder.
+PARAM_W = np.array([60, 60, 60, 10, 10, 10, 3, 3, 3, 0.3, 0.3, 0.3, 0.3, 0.3, 0.3], float)
 EPS = 1e-4
 
 
 def is_ped_rig(obj):
     return obj is not None and obj.type == "ARMATURE" and REQUIRED.issubset(obj.pose.bones.keys())
+
+
+def targets(rig):
+    """IK target handles this rig has."""
+    return [k for k, b in TARGET_BONES.items() if b in rig.pose.bones]
+
+
+def keyed(rig):
+    """Everything a pose writes, so everything Key Pose keys."""
+    return BODY_BONES + [TARGET_BONES[k] for k in targets(rig)]
+
+
+def rotation_owner_rest(rig):
+    """{control: axes the bone that copies its local rotation turns about}, e.g. IK_L_FA -> SKEL_L_Hand.
+    That bone turns by the control's own rotation, but about its own rest axes (with the constraint's
+    inverted axes flipped: the feet invert Y and Z), so a turn meant for the foot has to be expressed in
+    those axes, not the control's."""
+    out = {}
+    for pb in rig.pose.bones:
+        for c in pb.constraints:
+            if c.type == "COPY_ROTATION" and c.target == rig and c.target_space == "LOCAL" and c.subtarget:
+                flip = Matrix.Diagonal([-1 if inv else 1 for inv in (c.invert_x, c.invert_y, c.invert_z)])
+                out[c.subtarget] = rig.data.bones[pb.name].matrix_local.to_3x3() @ flip
+    return out
+
+
+def turn_control(rig, bone, m, R, pivot):
+    """Pose matrix m of `bone` turned by R about pivot, so whatever copies its rotation turns by R too."""
+    own = rotation_owner_rest(rig).get(bone)
+    if own is None:
+        return _about(m, pivot, R)
+    C = rig.data.bones[bone].matrix_local.to_3x3() @ own.inverted()
+    out = (C @ R.to_3x3() @ C.inverted() @ m.to_3x3()).to_4x4()
+    out.translation = (R @ (m.translation - pivot).to_4d()).to_3d() + pivot
+    return out
 
 
 def pinned(rig):
@@ -68,10 +123,18 @@ def look_point(rig):
     return head.head + head.matrix.col[1].xyz.normalized() * 0.8, False
 
 
+def root_center(rig):
+    pbs = rig.pose.bones
+    h = pbs["SKEL_ROOT"].head
+    return Vector((h.x, h.y, min(pbs["LEG_L_IK"].head.z, pbs["LEG_R_IK"].head.z) - FLOOR_BELOW_ANKLE))
+
+
 def handle_positions(rig):
     pbs = rig.pose.bones
-    out = {k: pbs[b].head.copy() for k, b in HANDLE_BONES.items()}
+    have = set(targets(rig))
+    out = {k: pbs[b].head.copy() for k, b in DRAWN_AT.items() if k in have or k not in TARGET_BONES}
     out["look"] = look_point(rig)[0]
+    out["root"] = root_center(rig)
     return out
 
 
@@ -85,8 +148,12 @@ def _conj(q, Rw):
     return (Rw.inverted() @ q @ Rw).to_matrix().to_4x4()
 
 
+def _about(m, pivot, R):
+    return Matrix.Translation(pivot) @ R @ Matrix.Translation(-pivot) @ m
+
+
 class Drag:
-    """One drag of one handle. Kept free of modal/UI code so it can be driven from a script."""
+    """One move or turn of one handle. Kept free of modal/UI code so it can be driven from a script."""
 
     def __init__(self, rig, key, mode="BODY", body_follows=0.5):
         self.rig, self.key, self.mode, self.bf = rig, key, mode, body_follows
@@ -97,21 +164,31 @@ class Drag:
             self.rel[n] = b.parent.matrix_local.inverted() @ b.matrix_local if b.parent else b.matrix_local.copy()
         self.parent = {n: bones[n].parent.name if bones[n].parent else None for n in TORSO}
         self.basis0 = {n: pbs[n].matrix_basis.copy() for n in TORSO}
-        self.keyed0 = {n: pbs[n].matrix_basis.copy() for n in KEYED}
-        self.targets0 = {k: pbs[HANDLE_BONES[k]].matrix.copy() for k in TARGETS}
+        self.keyed0 = {n: pbs[n].matrix_basis.copy() for n in keyed(rig)}
+        self.targets = targets(rig)
+        self.targets0 = {k: pbs[TARGET_BONES[k]].matrix.copy() for k in self.targets}
         self.fk0 = self.fk(self.basis0)
         self.R0 = {n: m.to_quaternion() for n, m in self.fk0.items()}
         self.look0, self.look_on = look_point(rig)
-        self.handle0 = self.look0.copy() if key == "look" else handle_positions(rig)[key]
+        self.handle0 = handle_positions(rig)[key]
         self.pins = pinned(rig)
-        if key in LIMBS and mode == "BODY":
+        if key in LIMBS and mode in ("BODY", "REACH"):
             self.pins.add(key)  # a dragged hand or foot stays where you put it
+        # while one hand is dragged the other stays where it is, softly: it gives way before the drag stalls
+        self.hold = {OTHER_HAND[key]} - self.pins if key in OTHER_HAND else set()
         self.limbs = {}
         for k, (a, b) in LIMBS.items():
             L = bones[a].length + bones[b].length
             d0 = (self.targets0[k].translation - self.fk0[a].translation).length
             self.limbs[k] = (a, L, max(0.995 * L, d0))
+        self.com0 = self.com(self.fk0, {k: m.translation for k, m in self.targets0.items()})
         self.x = np.zeros(15)
+
+    @staticmethod
+    def com(F, T):
+        """Rough centre of mass: mostly hips and chest, a little of each hand."""
+        return (0.45 * F["SKEL_ROOT"].translation + 0.35 * F["SKEL_Spine3"].translation
+                + 0.1 * T["hand_l"] + 0.1 * T["hand_r"])
 
     # --- kinematics -------------------------------------------------------------------------
     def fk(self, bases):
@@ -148,26 +225,30 @@ class Drag:
         return B
 
     # --- solve ------------------------------------------------------------------------------
-    def residuals(self, x, targets, hips_target):
+    def residuals(self, x, targets, goals, balance):
         F = self.fk(self.bases(x))
         r = []
-        for k in self.pins & LIMBS.keys():
+        for k in (self.pins | self.hold) & LIMBS.keys():
             root, L, cap = self.limbs[k]
             d = (targets[k] - F[root].translation).length
-            r.append(1000 * max(0.0, d - cap))  # far above the hips pull, so a pin always wins
-            if k.startswith("hand"):  # keep the arm a little bent if the body is allowed to follow
-                r.append(2 * self.bf * max(0.0, d - 0.85 * L))
-        if hips_target is not None:
-            r.extend(30 * (F["SKEL_ROOT"].translation - hips_target))
+            # when not everything can be reached, the dragged limb falls short first, then a held hand;
+            # a pin never gives
+            w = 100 if k == self.key else 300 if k in self.hold else 10000
+            r.append(w * max(0.0, d - cap))
+        for bone, (p, w) in goals.items():  # a torso bone pulled toward p
+            r.extend(w * (F[bone].translation - p))
+        if balance:  # hips shift against a reach, so the weight stays over the feet
+            c = self.com(F, targets) - self.com0
+            r.extend((6 * self.bf * c.x, 6 * self.bf * c.y))
         stiff = (1 - self.bf) * 8 + 0.15
         r.extend(np.sqrt(stiff * PARAM_W) * x)
         return np.array(r, float)
 
-    def solve(self, targets, hips_target):
+    def solve(self, targets, goals, balance=False):
         x, mu = self.x.copy(), 1e-3
-        f = lambda v: self.residuals(v, targets, hips_target)
+        f = lambda v: self.residuals(v, targets, goals, balance)
         r = f(x)
-        for _ in range(10):
+        for _ in range(15):
             J = np.empty((len(r), len(x)))
             for i in range(len(x)):
                 xp = x.copy()
@@ -186,54 +267,88 @@ class Drag:
         self.x = x
         return x
 
-    # --- drag -------------------------------------------------------------------------------
+    # --- write ------------------------------------------------------------------------------
+    def _write(self, x, T, carried, look, look_on):
+        B = self.bases(x)
+        if look_on:
+            B = self.aim(B, look)
+            self.rig["crck_look"] = list(look)
+        pbs = self.rig.pose.bones
+        for n in BODY_BONES:
+            pbs[n].matrix_basis = B[n]
+        F = self.fk(B)
+        for k in self.targets:
+            m = T[k]
+            if k in carried:
+                c = CARRY[k]
+                m = F[c] @ self.fk0[c].inverted() @ self.targets0[k]
+            pbs[TARGET_BONES[k]].matrix = m
+
+    def _start(self):
+        T = {k: m.copy() for k, m in self.targets0.items()}
+        carried = {k for k in self.targets if k not in self.pins | self.hold and k != self.key}
+        return T, carried, self.look0.copy(), self.look_on
+
     def move(self, p):
         """p: new handle position in armature space."""
-        rig, key = self.rig, self.key
-        targets = {k: m.translation.copy() for k, m in self.targets0.items()}
-        look, look_on = self.look0.copy(), self.look_on
-        carried = {k for k in TARGETS if k not in self.pins and k != key}
-        x, hips_target = np.zeros(15), None
+        key = self.key
+        T, carried, look, look_on = self._start()
+        pos = lambda: {k: m.translation for k, m in T.items()}
+        x = np.zeros(15)
 
-        if self.mode == "WHOLE":  # everything moves rigidly
+        if self.mode == "WHOLE" or key == "root":  # everything moves rigidly
             d = p - self.handle0
             x[0:3] = d
-            for k in targets:
-                targets[k] += d
+            for k in T:
+                T[k] = Matrix.Translation(d) @ T[k]
             look += d
             carried = set()
         elif key == "look":
             look, look_on = p, True
-        elif key == "hips":
-            hips_target = p
-            if self.mode == "LIMB" or self.bf <= 0:
+        elif key in GOAL_BONES:
+            if key == "hips" and (self.mode == "LIMB" or self.bf <= 0):
                 x[0:3] = p - self.handle0
             else:
-                x = self.solve(targets, hips_target)
+                x = self.solve(pos(), {GOAL_BONES[key]: (p, 300)}, balance=key != "hips")
+        elif key in BENDS:
+            # point the knee or elbow at p: the pole goes out past p, away from the root-to-end line
+            root = self.fk0[BENDS[key][0]].translation
+            end = T[BENDS[key][1]].translation
+            axis = (end - root).normalized()
+            out = (p - root) - axis * (p - root).dot(axis)
+            if out.length > 1e-4:
+                pole = p + out.normalized() * 0.5
+                T[key] = Matrix.Translation(pole - T[key].translation) @ T[key]
         else:
-            targets[key] = p
-            if self.mode == "BODY" and self.bf > 0 and key in LIMBS:
-                x = self.solve(targets, None)
+            T[key] = Matrix.Translation(p - T[key].translation) @ T[key]
+            if self.mode == "REACH" and self.bf > 0:  # Ctrl-drag: the body helps once the limb can't reach
+                x = self.solve(pos(), {})
             if self.mode == "LIMB":
                 carried = set()
+        self._write(x, T, carried, look, look_on)
 
-        B = self.bases(x)
-        if look_on:
-            B = self.aim(B, look)
-            rig["crck_look"] = list(look)
-        pbs = rig.pose.bones
-        for n in KEYED:
-            if n in B:
-                pbs[n].matrix_basis = B[n]
-        F = self.fk(B)
-        for k in TARGETS:
-            m = self.targets0[k]
-            if k in carried:
-                c = CARRY[k]
-                m = F[c] @ self.fk0[c].inverted() @ m
-            else:
-                m = Matrix.Translation(targets[k] - m.translation) @ m
-            pbs[HANDLE_BONES[k]].matrix = m
+    def turn(self, axis, angle):
+        """Turn the handle by `angle` radians about `axis` (armature space)."""
+        key = self.key
+        T, carried, look, look_on = self._start()
+        x = np.zeros(15)
+        axis = Vector(axis).normalized()
+        R = Matrix.Rotation(angle, 4, axis)
+        if key in LIMBS:
+            T[key] = turn_control(self.rig, TARGET_BONES[key], T[key], R, T[key].translation)
+        elif key == "hips":
+            x[3:6] = axis * angle
+        elif key == "chest":
+            x[6:9] = axis * angle
+        elif key == "root":  # the whole character about the vertical through the hips
+            R = Matrix.Rotation(angle, 4, "Z")
+            x[3:6] = (0, 0, angle)
+            pivot = self.fk0["SKEL_ROOT"].translation
+            for k in T:
+                T[k] = turn_control(self.rig, TARGET_BONES[k], T[k], R, pivot)
+            look = (R @ (look - pivot).to_4d()).to_3d() + pivot
+            carried = set()
+        self._write(x, T, carried, look, look_on)
 
     def cancel(self):
         for n, m in self.keyed0.items():
@@ -252,7 +367,7 @@ class Drag:
 
 # --- keys ---------------------------------------------------------------------------------
 def key_pose(rig, frame):
-    for n in KEYED:
+    for n in keyed(rig):
         pb = rig.pose.bones[n]
         pb.keyframe_insert("location", frame=frame, group=n)
         pb.keyframe_insert("rotation_quaternion", frame=frame, group=n)
@@ -330,48 +445,85 @@ def propagate(rig, frame, before, settings):
 _running = None  # the live AutoposeOperator, read by the draw callback and the panel
 
 
-def _circle(c, r, n=20):
-    import math
+def _circle2d(c, r, n=20):
     return [(c.x + r * math.cos(2 * math.pi * i / n), c.y + r * math.sin(2 * math.pi * i / n)) for i in range(n)]
+
+
+def _ring3d(center, r, n=48):
+    return [center + Vector((r * math.cos(2 * math.pi * i / n), r * math.sin(2 * math.pi * i / n), 0)) for i in range(n)]
+
+
+def _loop(pts):
+    return [v for i in range(len(pts)) for v in (pts[i], pts[(i + 1) % len(pts)])]
+
+
+def _project(region, rv3d, W, pts):
+    out = [view3d_utils.location_3d_to_region_2d(region, rv3d, W @ p) for p in pts]
+    return None if any(p is None for p in out) else out
 
 
 def _draw():
     op = _running
-    if op is None or op.rig.name not in bpy.data.objects:
+    rig = op.rig if op else None
+    if rig is None:
         return
     region, rv3d = bpy.context.region, bpy.context.region_data
-    rig, W = op.rig, op.rig.matrix_world
+    W = rig.matrix_world
     pins = op.drag.pins if op.drag else pinned(rig)
     look_on = look_point(rig)[1]
     shader = gpu.shader.from_builtin("UNIFORM_COLOR")
+
+    def draw(prim, pts, col):
+        shader.uniform_float("color", col)
+        batch_for_shader(shader, prim, {"pos": pts}).draw(shader)
+
     gpu.state.blend_set("ALPHA")
     gpu.state.line_width_set(2.0)
-    for key, pos in handle_positions(rig).items():
-        p = view3d_utils.location_3d_to_region_2d(region, rv3d, W @ pos)
+    pos = handle_positions(rig)
+
+    ring = _project(region, rv3d, W, _ring3d(pos.pop("root"), ROOT_RADIUS))
+    if ring:
+        col = COLORS["root"] if op.hover == "root" else (*COLORS["root"][:3], 0.6)
+        draw("LINES", _loop(ring), col)
+
+    for key, p3 in pos.items():
+        p = view3d_utils.location_3d_to_region_2d(region, rv3d, W @ p3)
         if p is None:
             continue
         col = list(COLORS[key])
         if key == "look" and not look_on:
             col[3] = 0.35
-        r = 11 if key == op.hover else 8
-        ring = _circle(p, r)
-        lines = [v for i in range(len(ring)) for v in (ring[i], ring[(i + 1) % len(ring)])]
-        shader.uniform_float("color", col)
-        batch_for_shader(shader, "LINES", {"pos": lines}).draw(shader)
-        if key in pins or key == "hips":
-            tris = [v for i in range(len(ring)) for v in (p, ring[i], ring[(i + 1) % len(ring)])]
-            shader.uniform_float("color", (col[0], col[1], col[2], 0.45))
-            batch_for_shader(shader, "TRIS", {"pos": tris}).draw(shader)
+        hover = key == op.hover
+        r = 11 if hover else 9
+        disc = lambda rad: [v for c in [_circle2d(p, rad)] for i in range(len(c)) for v in (p, c[i], c[(i + 1) % len(c)])]
+        if key == "hips":  # a square, like a centre of gravity control
+            for rr, cc in ((r + 2, (0, 0, 0, 0.6)), (r, col)):
+                sq = [(p.x - rr, p.y - rr), (p.x + rr, p.y - rr), (p.x + rr, p.y + rr), (p.x - rr, p.y + rr)]
+                draw("TRIS", [sq[0], sq[1], sq[2], sq[0], sq[2], sq[3]], cc)
+        elif key in RINGS or (key in LIMBS and key not in pins):  # aims, or rides with the body: a ring
+            draw("LINES", _loop(_circle2d(p, r + 1)), (0, 0, 0, 0.6))
+            draw("LINES", _loop(_circle2d(p, r)), col)
+            draw("TRIS", disc(3), col)
+        else:  # holds its place: a solid dot with a dark rim so it reads on any background
+            draw("TRIS", disc(r + 2), (0, 0, 0, 0.6))
+            draw("TRIS", disc(r), col)
+        if hover:
+            draw("LINES", _loop(_circle2d(p, r + 4)), (1, 1, 1, 0.95))
     gpu.state.line_width_set(1.0)
     gpu.state.blend_set("NONE")
 
 
 class CRCK_OT_autopose(bpy.types.Operator):
-    """Drag hips, hands, feet, knees or the look-at; the body follows. Esc to stop"""
+    """Drag hips, chest, hands, feet, knees, the look-at or the ground ring; the body follows. Esc to stop"""
     bl_idname = "crck_motion.autopose"
     bl_label = "Autopose"
 
     _handle = None
+
+    @property
+    def rig(self):
+        """Looked up by name each time: undo and file reloads replace the object, so a stored one goes stale."""
+        return bpy.data.objects.get(self.rig_name)
 
     @classmethod
     def poll(cls, context):
@@ -382,11 +534,12 @@ class CRCK_OT_autopose(bpy.types.Operator):
         if _running is not None:  # second click on the button stops it
             _running.stop = True
             return {"FINISHED"}
-        self.rig = context.active_object
+        self.rig_name = context.active_object.name
         self.region = next(r for r in context.area.regions if r.type == "WINDOW")
         self.rv3d = context.space_data.region_3d
         self.area = context.area
         self.drag, self.hover, self.stop = None, None, False
+        self.turning, self.click_confirms = False, False
         if context.mode != "POSE":
             bpy.ops.object.mode_set(mode="POSE")
         CRCK_OT_autopose._handle = bpy.types.SpaceView3D.draw_handler_add(_draw, (), "WINDOW", "POST_PIXEL")
@@ -398,39 +551,105 @@ class CRCK_OT_autopose(bpy.types.Operator):
     def finish(self):
         global _running
         if self.drag:
-            self.drag.cancel()
+            try:
+                self.drag.cancel()
+            except ReferenceError:  # the rig was replaced under the drag; nothing left to restore
+                pass
         bpy.types.SpaceView3D.draw_handler_remove(CRCK_OT_autopose._handle, "WINDOW")
         _running = None
         self.area.header_text_set(None)
         self.area.tag_redraw()
         return {"FINISHED"}
 
+    # --- screen helpers -----------------------------------------------------------------------
     def mouse(self, event):
         return Vector((event.mouse_x - self.region.x, event.mouse_y - self.region.y))
 
     def in_region(self, m):
         return 0 <= m.x < self.region.width and 0 <= m.y < self.region.height
 
+    def screen(self, p):
+        return view3d_utils.location_3d_to_region_2d(self.region, self.rv3d, self.rig.matrix_world @ p)
+
     def pick(self, m):
-        W, best, best_d = self.rig.matrix_world, None, 15.0
-        for key, pos in handle_positions(self.rig).items():
-            p = view3d_utils.location_3d_to_region_2d(self.region, self.rv3d, W @ pos)
+        pos = handle_positions(self.rig)
+        center = pos.pop("root")
+        best, best_d = None, 15.0
+        for key, p3 in pos.items():
+            p = self.screen(p3)
             if p is not None and (p - m).length < best_d:
                 best, best_d = key, (p - m).length
-        return best
+        if best:
+            return best
+        ring = _project(self.region, self.rv3d, self.rig.matrix_world, _ring3d(center, ROOT_RADIUS))
+        if ring and any(geometry.intersect_point_line_segment(m, a, b)[1] < 8
+                        for a, b in zip(ring, ring[1:] + ring[:1])):
+            return "root"
+        return None
 
     def to_armature(self, m):
         W = self.rig.matrix_world
-        world = view3d_utils.region_2d_to_location_3d(self.region, self.rv3d, m, W @ self.drag.handle0)
+        if self.drag.key == "root":  # slide along the floor
+            o = view3d_utils.region_2d_to_origin_3d(self.region, self.rv3d, m)
+            d = view3d_utils.region_2d_to_vector_3d(self.region, self.rv3d, m)
+            floor = W @ self.drag.handle0
+            hit = geometry.intersect_line_plane(o, o + d, floor, W.to_3x3() @ Vector((0, 0, 1)))
+            world = hit if hit is not None else floor
+        else:
+            world = view3d_utils.region_2d_to_location_3d(self.region, self.rv3d, m, W @ self.drag.handle0)
         return W.inverted() @ world + self.grab_offset
+
+    def view_axis(self):
+        """Toward the viewer, in armature space: turning about it follows the mouse on screen."""
+        to_viewer = self.rv3d.view_rotation @ Vector((0, 0, 1))
+        return (self.rig.matrix_world.to_3x3().inverted() @ to_viewer).normalized()
+
+    def screen_angle(self, m):
+        c = self.screen(self.drag.handle0) or m
+        return math.atan2(m.y - c.y, m.x - c.x)
 
     def header(self, context):
         s = context.scene.crck_motion
-        self.area.header_text_set(
-            f"Autopose  |  Shift: whole body   Alt: only this limb   Wheel: Reach {s.reach}   Esc/RMB: cancel")
+        if self.turning:
+            text = "Turn  |  X/Y/Z: axis   V: view axis   Click/Enter: confirm   Esc/RMB: cancel"
+        else:
+            text = "Move  |  Shift: whole body   Ctrl: body helps a hand/foot reach   Alt: only this limb   Wheel: Reach {}   Esc/RMB: cancel".format(s.reach)
+        self.area.header_text_set(text)
+
+    # --- drags ---------------------------------------------------------------------------------
+    def begin(self, context, event, key, turning=False, click_confirms=False):
+        s = context.scene.crck_motion
+        mode = "WHOLE" if event.shift else "LIMB" if event.alt else "REACH" if event.ctrl else "BODY"
+        self.drag = Drag(self.rig, key, mode, s.body_follows)
+        self.turning, self.click_confirms = turning, click_confirms
+        m = self.mouse(event)
+        if turning:
+            self.axis = self.view_axis()
+            self.angle0 = self.screen_angle(m)
+        else:
+            self.grab_offset = Vector()
+            self.grab_offset = self.drag.handle0 - self.to_armature(m)
+        self.header(context)
+
+    def update(self, m):
+        if self.turning:
+            a = self.screen_angle(m) - self.angle0
+            self.drag.turn(self.axis, a)
+        else:
+            self.drag.move(self.to_armature(m))
+
+    def end(self, context, keep):
+        if keep:
+            self.drag.commit(context.scene, context.scene.crck_motion)
+            bpy.ops.ed.undo_push(message="Autopose")
+        else:
+            self.drag.cancel()
+        self.drag = None
+        self.turning = False
+        self.area.header_text_set(None)
 
     def modal(self, context, event):
-        if self.stop or self.rig.name not in bpy.data.objects or context.mode != "POSE":
+        if self.stop or not is_ped_rig(self.rig) or context.mode != "POSE":
             return self.finish()
         self.area.tag_redraw()
         m = self.mouse(event)
@@ -438,19 +657,20 @@ class CRCK_OT_autopose(bpy.types.Operator):
 
         if self.drag:
             if event.type == "MOUSEMOVE":
-                self.drag.move(self.to_armature(m))
+                self.update(m)
+            elif self.turning and event.type in {"X", "Y", "Z", "V"} and event.value == "PRESS":
+                self.axis = self.view_axis() if event.type == "V" else Vector(
+                    {"X": (1, 0, 0), "Y": (0, 1, 0), "Z": (0, 0, 1)}[event.type])
+                self.update(m)
             elif event.type in {"WHEELUPMOUSE", "WHEELDOWNMOUSE"}:
                 s.reach = max(0, s.reach + (1 if event.type == "WHEELUPMOUSE" else -1))
                 self.header(context)
-            elif event.type == "LEFTMOUSE" and event.value == "RELEASE":
-                self.drag.commit(context.scene, s)
-                self.drag = None
-                self.area.header_text_set(None)
-                bpy.ops.ed.undo_push(message="Autopose")
+            elif event.type == "LEFTMOUSE" and event.value == ("PRESS" if self.click_confirms else "RELEASE"):
+                self.end(context, True)
+            elif event.type in {"RET", "NUMPAD_ENTER"} and event.value == "PRESS":
+                self.end(context, True)
             elif event.type in {"RIGHTMOUSE", "ESC"} and event.value == "PRESS":
-                self.drag.cancel()
-                self.drag = None
-                self.area.header_text_set(None)
+                self.end(context, False)
             return {"RUNNING_MODAL"}
 
         if not self.in_region(m):
@@ -458,12 +678,13 @@ class CRCK_OT_autopose(bpy.types.Operator):
         if event.type == "MOUSEMOVE":
             self.hover = self.pick(m)
         elif event.type == "LEFTMOUSE" and event.value == "PRESS" and self.hover:
-            mode = "WHOLE" if event.shift else "LIMB" if event.alt else "BODY"
-            self.drag = Drag(self.rig, self.hover, mode, s.body_follows)
-            W = self.rig.matrix_world
-            hit = view3d_utils.region_2d_to_location_3d(self.region, self.rv3d, m, W @ self.drag.handle0)
-            self.grab_offset = self.drag.handle0 - W.inverted() @ hit
-            self.header(context)
+            self.begin(context, event, self.hover)
+            return {"RUNNING_MODAL"}
+        elif event.type == "G" and event.value == "PRESS" and self.hover:
+            self.begin(context, event, self.hover, click_confirms=True)
+            return {"RUNNING_MODAL"}
+        elif event.type == "R" and event.value == "PRESS" and self.hover in TURNABLE:
+            self.begin(context, event, self.hover, turning=True, click_confirms=True)
             return {"RUNNING_MODAL"}
         elif event.type == "P" and event.value == "PRESS" and self.hover in LIMBS:
             toggle_pin(self.rig, self.hover)

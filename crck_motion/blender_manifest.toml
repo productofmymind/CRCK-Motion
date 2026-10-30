@@ -10,3 +10,6 @@ website = "https://github.com/productofmymind/CRCK-Motion"
 blender_version_min = "4.4.0"
 license = ["SPDX:GPL-3.0-or-later"]
 tags = ["Animation", "Rigging"]
+
+[permissions]
+files = "Import the ped body from a .blend and save pose presets"
