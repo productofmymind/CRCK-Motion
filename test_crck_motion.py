@@ -253,6 +253,18 @@ check("thinning ignores quaternion sign flips", turn < 1.5, f"{turn:.2f} deg")
 bpy.data.actions.remove(rig.animation_data.action)
 rig.animation_data.action = kept_action
 
+# 5c game clip index: in-game animations only, one per name, a later archive overrides an earlier one
+sample = chr(10).join([
+    "x64c.rpf/anim/ingame/clip_amb@.rpf/amb@a@base.ycd  100",
+    "x64c.rpf/anim/cutscene/cuts_x.rpf/cs_scene.ycd  200",
+    "x64c.rpf/anim/ingame/clip_misc.rpf/b_clip.ycd  300",
+    "update/x64/dlcpacks/patch1/dlc.rpf/x64/anim/ingame/clip_amb@.rpf/amb@a@base.ycd  150",
+    "x64t.rpf/levels/gta5/props/prop_anim.ycd  50",
+    "12 match(es)"])
+idx = dict(gta_clip.parse_index(sample))
+check("clip index keeps in-game dictionaries only", set(idx) == {"amb@a@base", "b_clip"}, sorted(idx))
+check("a later archive overrides an earlier one", "dlcpacks/patch1" in idx["amb@a@base"], idx["amb@a@base"])
+
 # 6 bake
 C.scene.frame_start, C.scene.frame_end = 0, 20
 with C.temp_override(active_object=rig):

@@ -62,9 +62,15 @@ class CRCKMotionPreferences(bpy.types.AddonPreferences):
         description="Your CodeWalker install (the folder with CodeWalker.Core.dll). Import GTA Clip uses it to "
                     "read binary .ycd files; .ycd.xml files don't need it")
 
+    explorer_cli: bpy.props.StringProperty(
+        name="CRCK Explorer", subtype="FILE_PATH",
+        description="crck-explorer-cli.exe from CRCK Explorer. Browse Game Clips uses it to list and extract the "
+                    "animation dictionaries in your own GTA V files")
+
     def draw(self, context):
         self.layout.prop(self, "body_path")
         self.layout.prop(self, "codewalker_dir")
+        self.layout.prop(self, "explorer_cli")
 
 
 def prefs():
@@ -422,13 +428,16 @@ class CRCK_PT_panel(bpy.types.Panel):
         box.operator(gta_clip.CRCK_OT_thin_keys.bl_idname, icon="IPO_BEZIER")
 
         layout.operator(gta_clip.CRCK_OT_import_clip.bl_idname, icon="IMPORT")
+        row = layout.row(align=True)
+        row.operator(gta_clip.CRCK_OT_browse_clips.bl_idname, icon="VIEWZOOM")
+        row.operator(gta_clip.CRCK_OT_browse_clips.bl_idname, text="", icon="FILE_REFRESH").refresh = True
         layout.operator(CRCK_OT_bake.bl_idname, icon="EXPORT")
         layout.operator(gta_clip.CRCK_OT_export_clip.bl_idname, icon="EXPORT")
 
 
 classes = (CRCKMotionSettings, CRCKMotionPreferences, CRCK_OT_import_body, CRCK_OT_fix_body_facing, CRCK_OT_add_elbow_poles,
            CRCK_OT_add_rig, CRCK_OT_key_pose,
-           CRCK_OT_toggle_pin, CRCK_OT_bake, autopose.CRCK_OT_autopose, gta_clip.CRCKClipChoice, gta_clip.CRCK_OT_import_clip_pick, gta_clip.CRCK_OT_import_clip, gta_clip.CRCK_OT_thin_keys, gta_clip.CRCK_OT_export_clip, CRCK_PT_panel, *presets.classes)
+           CRCK_OT_toggle_pin, CRCK_OT_bake, autopose.CRCK_OT_autopose, gta_clip.CRCKClipChoice, gta_clip.CRCK_OT_import_clip_pick, gta_clip.CRCK_OT_import_clip, gta_clip.CRCK_OT_browse_clips, gta_clip.CRCK_OT_thin_keys, gta_clip.CRCK_OT_export_clip, CRCK_PT_panel, *presets.classes)
 
 
 def register():

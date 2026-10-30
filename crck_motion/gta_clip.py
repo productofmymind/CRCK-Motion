@@ -8,6 +8,8 @@ rig: plain bones copy their turn, hands and feet get their IK targets, elbows an
 import importlib
 import math
 import os
+import re
+import shutil
 import subprocess
 import tempfile
 import xml.etree.ElementTree as ET
@@ -20,6 +22,7 @@ from mathutils import Matrix, Vector
 from . import autopose as ap, presets as pr
 
 HELPER_SRC = Path(__file__).parent / "ycdtool.cs"
+NO_WINDOW = getattr(subprocess, "CREATE_NO_WINDOW", 0)
 CSC = Path(os.environ.get("WINDIR", r"C:\Windows")) / "Microsoft.NET" / "Framework64" / "v4.0.30319" / "csc.exe"
 LIMB_ENDS = [("Hand", "IK_{}_FA", "UpperArm", "Forearm", "POLE_{}_FA"),
              ("Foot", "LEG_{}_IK", "Thigh", "Calf", "LEG_{}_POLE")]
@@ -35,7 +38,7 @@ def helper_exe():
         raise RuntimeError("Reading .ycd needs the .NET Framework C# compiler, which wasn't found. "
                            "Export the clip to .ycd.xml with CodeWalker and import that instead")
     r = subprocess.run([str(CSC), "-nologo", f"-out:{out}", "-r:System.Xml.dll", "-r:System.Core.dll", str(HELPER_SRC)],
-                       capture_output=True, text=True)
+                       capture_output=True, text=True, creationflags=NO_WINDOW)
     if r.returncode:
         raise RuntimeError("Couldn't build the .ycd helper: " + (r.stdout + r.stderr).strip()[-400:])
     return out
@@ -46,7 +49,7 @@ def ycd_to_xml(path, codewalker):
         raise RuntimeError("Reading .ycd uses your CodeWalker install: set its folder in "
                            "Preferences > Add-ons > CRCK Motion > CodeWalker Folder (or import a .ycd.xml)")
     out = Path(tempfile.mkdtemp(prefix="crck_ycd_")) / (Path(path).stem + ".ycd.xml")
-    r = subprocess.run([str(helper_exe()), str(codewalker), "to-xml", str(path), str(out)], capture_output=True, text=True)
+    r = subprocess.run([str(helper_exe()), str(codewalker), "to-xml", str(path), str(out)], capture_output=True, text=True, creationflags=NO_WINDOW)
     if r.returncode:
         raise RuntimeError(f"CodeWalker couldn't read {Path(path).name}: {r.stderr.strip()}")
     return out
@@ -56,7 +59,7 @@ def xml_to_ycd(xml, out, codewalker):
     if not codewalker or not (Path(codewalker) / "CodeWalker.Core.dll").exists():
         raise RuntimeError("Writing .ycd uses your CodeWalker install: set its folder in "
                            "Preferences > Add-ons > CRCK Motion > CodeWalker Folder (or export a .ycd.xml)")
-    r = subprocess.run([str(helper_exe()), str(codewalker), "to-ycd", str(xml), str(out)], capture_output=True, text=True)
+    r = subprocess.run([str(helper_exe()), str(codewalker), "to-ycd", str(xml), str(out)], capture_output=True, text=True, creationflags=NO_WINDOW)
     if r.returncode:
         raise RuntimeError(f"CodeWalker couldn't write {Path(out).name}: {r.stderr.strip()}")
 
@@ -475,6 +478,112 @@ class CRCK_OT_import_clip(bpy.types.Operator):
         self.report({"INFO"}, f"Imported {len(made)} clip(s): {', '.join(a.name for a in made)}. "
                               "Switch between them in the Action editor")
         return {"FINISHED"}
+
+
+# --- browsing the game's own clips ----------------------------------------------------------------
+_items = []  # enum items must outlive the callback or Blender shows garbage
+
+
+def explorer_cli(configured=""):
+    """CRCK Explorer's command line: the preference, else one on PATH."""
+    cli = Path(bpy.path.abspath(configured)) if configured else None
+    if cli and cli.is_file():
+        return cli
+    found = shutil.which("crck-explorer-cli")
+    if found:
+        return Path(found)
+    raise RuntimeError("Browsing the game's clips uses CRCK Explorer: set the path to crck-explorer-cli.exe in "
+                       "Preferences > Add-ons > CRCK Motion > CRCK Explorer")
+
+
+def parse_index(text):
+    """[(dictionary name, archive path)] from `game search` output: the in-game animations only (cutscenes
+    are built for their own scene skeletons), one per name. A patch or DLC archive listed later overrides an
+    earlier one, as it does in the game, so the last listing wins."""
+    best = {}
+    for line in text.splitlines():
+        m = re.match(r"^(.+\.ycd)\s+\d+\s*$", line)
+        if m and "/anim/ingame/" in m[1]:
+            best[Path(m[1]).stem] = m[1]
+    return sorted(best.items(), key=lambda kv: kv[0].lower())
+
+
+def cache_dir(name):
+    return Path(bpy.utils.extension_path_user(__package__, path=name, create=True))
+
+
+def game_index(cli, refresh=False):
+    """The game's clip dictionaries, indexed once and remembered (a game update means refreshing)."""
+    cache = cache_dir("clip_index") / "index.txt"
+    if refresh or not cache.exists():
+        r = subprocess.run([str(cli), "game", "search", "*.ycd", "--kind", "files", "--limit", "500000"],
+                           capture_output=True, text=True, creationflags=NO_WINDOW)
+        if r.returncode or "/anim/ingame/" not in r.stdout:
+            raise RuntimeError("CRCK Explorer couldn't list the game's clips: "
+                               + ((r.stderr or r.stdout).strip() or "no game found")[-300:])
+        cache.write_text(r.stdout, encoding="utf-8")
+    return parse_index(cache.read_text(encoding="utf-8"))
+
+
+def extract_dictionary(cli, archive_path):
+    out = cache_dir("clips") / Path(archive_path).name
+    if not out.exists():
+        r = subprocess.run([str(cli), "game", "get", archive_path, str(out)], capture_output=True, text=True,
+                           creationflags=NO_WINDOW)
+        if r.returncode or not out.exists():
+            raise RuntimeError(f"CRCK Explorer couldn't extract {Path(archive_path).name}: {(r.stderr or r.stdout).strip()[-300:]}")
+    return out
+
+
+def fill_items(index):
+    _items[:] = [(path, name, Path(path).parent.name if "/dlcpacks/" not in path else
+                  f"{path.split('dlcpacks/')[1].split('/')[0]} DLC / {Path(path).parent.name}", "", i)
+                 for i, (name, path) in enumerate(index)]
+
+
+def _dictionary_items(self, context):
+    return _items
+
+
+class CRCK_OT_browse_clips(bpy.types.Operator):
+    """Search every in-game animation dictionary in your GTA V files and import one onto the control rig"""
+    bl_idname = "crck_motion.browse_clips"
+    bl_label = "Browse Game Clips"
+    bl_options = {"REGISTER", "UNDO"}
+    bl_property = "dictionary"  # what the search popup lists
+
+    dictionary: bpy.props.EnumProperty(name="Dictionary", items=_dictionary_items)
+    refresh: bpy.props.BoolProperty(
+        name="Refresh", default=False, options={"HIDDEN", "SKIP_SAVE"},
+        description="List the game's clips again (after a game update)")
+
+    @classmethod
+    def poll(cls, context):
+        return ap.is_ped_rig(context.active_object)
+
+    def invoke(self, context, event):
+        from . import prefs
+        p = prefs()
+        try:
+            index = game_index(explorer_cli(p.explorer_cli if p else ""), self.refresh)
+        except RuntimeError as e:
+            self.report({"ERROR"}, str(e))
+            return {"CANCELLED"}
+        fill_items(index)
+        context.window_manager.invoke_search_popup(self)
+        return {"RUNNING_MODAL"}
+
+    def execute(self, context):
+        from . import prefs
+        p = prefs()
+        if not self.dictionary:
+            return {"CANCELLED"}
+        try:
+            file = extract_dictionary(explorer_cli(p.explorer_cli if p else ""), self.dictionary)
+        except RuntimeError as e:
+            self.report({"ERROR"}, str(e))
+            return {"CANCELLED"}
+        return bpy.ops.crck_motion.import_clip("EXEC_DEFAULT", filepath=str(file))
 
 
 class CRCKClipChoice(bpy.types.PropertyGroup):

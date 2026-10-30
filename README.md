@@ -15,7 +15,7 @@
 | Keep a foot planted, or let a hand ride along | **Pinned or carried** per hand and foot (**P** over a handle) |
 | Change one frame without breaking the motion | **Reach**: with Auto Keying on, an edit fades into the keys around it (Smooth, Hold, Linear or Sharp falloff) |
 | Start from a pose instead of a T-pose | **Presets**: a thumbnail browser for saved poses and animations. Preview, blend, mirror, apply, and save your own |
-| Start from a real GTA V animation | **Import GTA Clip**: a `.ycd` or `.ycd.xml` becomes editable keys on the control rig, one action per clip |
+| Start from a real GTA V animation | **Browse Game Clips** (search your game's ~11,000 dictionaries) or **Import GTA Clip** (a `.ycd` or `.ycd.xml` file): editable keys on the control rig, one action per clip |
 | Get the animation into the game | **Export GTA Clip**: bakes onto `skel` and saves a `.ycd` (or `.ycd.xml`) in one step. **Bake to Game Skeleton** does just the bake, for exporting with Sollumz yourself |
 | Lighter, easier-to-edit keys | **Thin Keys**: the fewest whole-pose keys that keep the motion within a tolerance (imports are thinned this way too) |
 
@@ -78,6 +78,7 @@ Your own presets are saved in Blender's extension user folder (`extensions/.user
 
 - **Sollumz** has to be installed: it reads the clip dictionary.
 - **Binary `.ycd`** is read through your own **CodeWalker** install: set its folder once in Preferences > Add-ons > CRCK Motion > CodeWalker Folder. CRCK Motion builds a small helper (`ycdtool.cs`, using the C# compiler that comes with Windows) that asks CodeWalker to turn the file into `.ycd.xml`. No CodeWalker code ships with the add-on. A `.ycd.xml` needs none of this.
+- **Browse Game Clips** lists every in-game animation dictionary in your own GTA V files (about 11,000) in a searchable popup: type a few words (`cop idles`, `mime`, `sit chair`), pick one, and it is extracted and imported. The button next to it re-reads the game after an update. It uses **CRCK Explorer**: set the path to `crck-explorer-cli.exe` in Preferences > Add-ons > CRCK Motion > CRCK Explorer. When a name is in more than one archive (a patch or DLC copy), the one the game uses, the later archive, is listed. Cutscene dictionaries aren't listed: they are built for their own scene skeletons.
 - A dictionary with several clips asks which to import (all ticked to start with).
 - **Root Motion** (in the file browser's side panel): off, the clip plays where your character stands; on, the character moves where the game would put it (for a seated clip that is the seat's spot).
 - How it converts: the game skeleton plays the clip, then each frame is written onto the control rig. Plain bones (spine, neck, head, fingers, pelvis, toes) copy their turn; hands and feet get their IK targets; elbows and knees get their poles, turned until the joint lands where the clip has it. Hands, feet, elbows, knees and head land within 0.01 cm of the clip.
